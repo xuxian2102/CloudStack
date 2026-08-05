@@ -1,15 +1,33 @@
-# 云栈 CloudStack
+<p align="center">
+  <img src="https://raw.githubusercontent.com/xuxian2102/CloudStack/main/packaging/arch/icons/dev.xuxian.cloudstack.svg" width="128" alt="CloudStack 图标">
+</p>
 
-[![Arch Wayland CI](https://github.com/xuxian2102/CloudStack/actions/workflows/linux.yml/badge.svg)](https://github.com/xuxian2102/CloudStack/actions/workflows/linux.yml)
+<h1 align="center">云栈 CloudStack</h1>
+
+<p align="center">
+  面向 Arch Linux Wayland 的原生 GTK4 Markdown 编辑器
+</p>
+
+<p align="center">
+  <a href="https://github.com/xuxian2102/CloudStack/actions/workflows/linux.yml"><img src="https://github.com/xuxian2102/CloudStack/actions/workflows/linux.yml/badge.svg" alt="Arch Wayland CI"></a>
+  <a href="https://github.com/xuxian2102/CloudStack/releases/latest"><img src="https://img.shields.io/github/v/release/xuxian2102/CloudStack?display_name=tag&sort=semver" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/xuxian2102/CloudStack" alt="Apache License 2.0"></a>
+</p>
 
 云栈（CloudStack）是一个只面向 **Arch Linux rolling + 原生 Wayland** 的个人 Markdown
-编辑器。`v0.2.2` 使用纯 Rust、GTK4、libadwaita、GtkSourceView 5 和 WebKitGTK 6，
-不再包含 Tauri、React、Node.js 或 Vite 构建链。
+编辑器。当前版本 `v0.2.2` 使用纯 Rust、GTK4、libadwaita、GtkSourceView 5 和
+WebKitGTK 6，不再包含 Tauri、React、Node.js 或 Vite 构建链。
 
 早期 Tauri 版本及其历史保留在
 [`Astro_Editor`](https://github.com/xuxian2102/Astro_Editor) legacy 仓库中。CloudStack
 从原生 GTK4 版本开始维护；新项目使用 `.cloudstack.json`，并继续兼容已有项目的
 `.blog-editor.json`。
+
+## 项目状态
+
+CloudStack 目前围绕“写 Markdown、预览内容、管理本地图片、透明发布到 Git”这条个人工作流
+持续完善。它是一个明确限定运行环境的个人项目，不追求跨平台兼容；欢迎在支持的环境中提交
+可复现的问题和小范围改进建议。
 
 ## 功能
 
@@ -27,7 +45,7 @@
 GitHub 建仓功能可选依赖 `github-cli`，并要求用户先在终端完成 `gh auth login`；应用
 不会读取或展示 token，也不会代替用户处理登录。
 
-## 安装
+## 快速开始
 
 通过仓库里的 Arch VCS 包构建安装：
 
@@ -43,6 +61,14 @@ makepkg -si
 ```bash
 sudo pacman -Rns cloudstack-git
 ```
+
+也可以直接从源码运行：
+
+```bash
+cargo run -p cloudstack-gtk --bin cloudstack
+```
+
+第一次打开普通文件夹时，CloudStack 会提供项目初始化向导；不需要预先手写配置文件。
 
 ## 博客项目配置
 
@@ -113,6 +139,12 @@ GTK 是唯一持有文件与 Git 权限的 UI。预览文档的原始 HTML会被
 架构细节见 [原生架构](docs/cloudstack-architecture.md)，Markdown 方言见
 [Markdown 与公式渲染](docs/markdown-rendering.md)，Arch 包说明见
 [packaging/arch/README.md](packaging/arch/README.md)。
+
+## 参与项目
+
+请先阅读 [贡献指南](CONTRIBUTING.md)。Bug 和功能建议可以直接使用仓库的 Issue 表单；提交
+问题时请附上 CloudStack 版本、Arch/Wayland 环境、复现步骤和相关日志。涉及安全问题时，
+请按照 [安全策略](SECURITY.md) 私下报告，不要直接公开利用细节。
 
 ## 许可证
 

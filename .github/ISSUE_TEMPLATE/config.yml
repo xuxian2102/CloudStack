@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 安全漏洞
+    url: https://github.com/xuxian2102/CloudStack/security/advisories/new
+    about: 请使用私下的 Security Advisory，不要在公开 Issue 中披露漏洞细节。
