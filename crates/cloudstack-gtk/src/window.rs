@@ -3,6 +3,8 @@ mod drafts;
 mod frontmatter;
 mod git_panel;
 mod publish;
+mod recent;
+mod welcome;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -54,9 +56,12 @@ enum OpenProjectOutcome {
 struct Widgets {
     window: adw::ApplicationWindow,
     toast_overlay: adw::ToastOverlay,
+    content_stack: gtk::Stack,
+    welcome_page: welcome::WelcomePage,
     post_list: gtk::ListBox,
     git_panel: git_panel::GitPanel,
     open_button: gtk::Button,
+    home_button: gtk::Button,
     new_button: gtk::Button,
     rename_button: gtk::Button,
     delete_button: gtk::Button,
@@ -88,6 +93,7 @@ pub fn present(application: &adw::Application) {
     connect_actions(application, &widgets, &state);
     connect_post_list(&widgets, &state);
     connect_close_guard(&widgets, &state);
+    recent::load_async(&widgets, &state);
 
     #[cfg(feature = "e2e")]
     if let Some(root) = std::env::var_os("CLOUDSTACK_E2E_PROJECT") {
@@ -112,6 +118,12 @@ fn build_window(application: &adw::Application) -> Widgets {
         .icon_name("document-open-symbolic")
         .tooltip_text("打开项目文件夹 (Ctrl+O)")
         .action_name("win.open-project")
+        .build();
+    let home_button = gtk::Button::builder()
+        .icon_name("go-home-symbolic")
+        .tooltip_text("返回主页，关闭当前项目")
+        .action_name("win.close-project")
+        .sensitive(false)
         .build();
     let save_content = adw::ButtonContent::builder()
         .icon_name("document-save-symbolic")
@@ -138,6 +150,7 @@ fn build_window(application: &adw::Application) -> Widgets {
 
     let header = adw::HeaderBar::new();
     header.pack_start(&open_button);
+    header.pack_start(&home_button);
     header.pack_start(&project_label);
     header.pack_end(&properties_button);
     header.pack_end(&save_button);
@@ -311,7 +324,17 @@ fn build_window(application: &adw::Application) -> Widgets {
         .shrink_end_child(false)
         .build();
 
-    toast_overlay.set_child(Some(&split));
+    let welcome_page = welcome::WelcomePage::new();
+    let content_stack = gtk::Stack::builder()
+        .transition_type(gtk::StackTransitionType::Crossfade)
+        .vexpand(true)
+        .hexpand(true)
+        .build();
+    content_stack.add_named(welcome_page.widget(), Some("welcome"));
+    content_stack.add_named(&split, Some("workspace"));
+    content_stack.set_visible_child_name("welcome");
+
+    toast_overlay.set_child(Some(&content_stack));
     let toolbar_view = adw::ToolbarView::new();
     toolbar_view.add_top_bar(&header);
     toolbar_view.set_content(Some(&toast_overlay));
@@ -320,9 +343,12 @@ fn build_window(application: &adw::Application) -> Widgets {
     Widgets {
         window,
         toast_overlay,
+        content_stack,
+        welcome_page,
         post_list,
         git_panel,
         open_button,
+        home_button,
         new_button,
         rename_button,
         delete_button,
@@ -479,6 +505,12 @@ fn connect_actions(
     open_action.connect_activate(move |_, _| select_project(&open_widgets, &open_state));
     widgets.window.add_action(&open_action);
 
+    let close_project_action = gio::SimpleAction::new("close-project", None);
+    let close_widgets = widgets.clone();
+    let close_state = Rc::clone(state);
+    close_project_action.connect_activate(move |_, _| close_project(&close_widgets, &close_state));
+    widgets.window.add_action(&close_project_action);
+
     let save_action = gio::SimpleAction::new("save", None);
     let save_widgets = widgets.clone();
     let save_state = Rc::clone(state);
@@ -629,16 +661,25 @@ fn connect_post_list(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
         });
 }
 
-fn select_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
+/// `select_project`（打开新项目）和 `close_project`（返回主页）共用的守卫：
+/// 忙碌或有未保存文章时都不能切走。
+fn ensure_no_unsaved_documents(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) -> bool {
     let state_snapshot = state.borrow();
     if state_snapshot.busy {
-        return;
+        return false;
     }
     if !state_snapshot.unsaved_documents.is_empty() {
+        drop(state_snapshot);
         toast(widgets, "当前项目有未保存文章，请先保存后再切换项目");
+        return false;
+    }
+    true
+}
+
+fn select_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
+    if !ensure_no_unsaved_documents(widgets, state) {
         return;
     }
-    drop(state_snapshot);
 
     let dialog = gtk::FileDialog::builder()
         .title("选择博客项目目录")
@@ -662,6 +703,39 @@ fn select_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
             Err(error) => show_error(&widgets, &format!("打开目录失败：{error}")),
         },
     );
+}
+
+/// `open_project` 的 `Opened` 分支反着走一遍：完全关闭当前项目，回到欢迎页。
+fn close_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
+    if !ensure_no_unsaved_documents(widgets, state) {
+        return;
+    }
+    if state.borrow().project.is_none() {
+        return;
+    }
+
+    let mut editor_state = state.borrow_mut();
+    editor_state.project = None;
+    editor_state.posts.clear();
+    editor_state.document = None;
+    editor_state.dirty = false;
+    editor_state.git_snapshot = None;
+    editor_state.document_epoch = editor_state.document_epoch.wrapping_add(1);
+    let epoch = editor_state.document_epoch;
+    drop(editor_state);
+
+    populate_post_list(widgets, state, &[]);
+    widgets.buffer.set_text("");
+    widgets.preview.clear(epoch);
+    widgets.frontmatter_split.set_show_sidebar(false);
+    widgets.project_label.set_label("尚未打开项目");
+    widgets.window.set_title(Some("云栈 CloudStack"));
+    widgets.content_stack.set_visible_child_name("welcome");
+    git_panel::refresh(widgets, state);
+    set_busy(widgets, state, false, "");
+    // touch() 在打开项目时是 fire-and-forget，不会刷新欢迎页已绑定的列表；
+    // 不重新加载的话，这里看到的还是打开这个项目之前的旧快照。
+    recent::load_async(widgets, state);
 }
 
 fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path) {
@@ -701,6 +775,7 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
             let mut content_repair = None;
             match result {
                 Ok(OpenProjectOutcome::Opened(context, post_summaries)) => {
+                    let root_for_recent = context.root.clone();
                     widgets
                         .project_label
                         .set_label(&context.root.display().to_string());
@@ -729,7 +804,15 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
                     );
                     #[cfg(not(feature = "e2e"))]
                     widgets.frontmatter_split.set_show_sidebar(false);
-                    widgets.window.set_title(Some("云栈 CloudStack"));
+                    let folder_name = root_for_recent
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| root_for_recent.display().to_string());
+                    widgets
+                        .window
+                        .set_title(Some(&format!("云栈 CloudStack — {folder_name}")));
+                    widgets.content_stack.set_visible_child_name("workspace");
+                    recent::touch(&root_for_recent);
                     frontmatter::refresh(&widgets, &state);
                     git_panel::refresh(&widgets, &state);
                 }
@@ -1262,6 +1345,8 @@ fn sync_controls(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     let has_unsaved_documents = !state.unsaved_documents.is_empty();
     let stable = !state.busy && !has_unsaved_documents;
     widgets.open_button.set_sensitive(stable);
+    widgets.welcome_page.set_open_sensitive(stable);
+    widgets.home_button.set_sensitive(has_project && stable);
     widgets.new_button.set_sensitive(has_project && stable);
     widgets.rename_button.set_sensitive(has_document && stable);
     widgets.delete_button.set_sensitive(has_document && stable);

@@ -109,6 +109,12 @@ if ((window_seen == 0)); then
 fi
 
 sleep 1
+tree=$(swaymsg -s "$sway_socket" -r -t get_tree 2>/dev/null || true)
+if ! printf '%s' "$tree" | grep -Fq 'test-blog'; then
+  echo "窗口标题没有反映已打开的项目（未找到 test-blog）" >&2
+  sed -n '1,240p' "$runtime_dir/app.log" >&2
+  exit 1
+fi
 swaymsg -s "$sway_socket" '[app_id="dev.xuxian.cloudstack"] kill' >/dev/null
 for _attempt in {1..100}; do
   kill -0 "$app_pid" 2>/dev/null || break
