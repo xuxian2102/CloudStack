@@ -804,10 +804,7 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
                     );
                     #[cfg(not(feature = "e2e"))]
                     widgets.frontmatter_split.set_show_sidebar(false);
-                    let folder_name = root_for_recent
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| root_for_recent.display().to_string());
+                    let folder_name = project_folder_name(&root_for_recent);
                     widgets
                         .window
                         .set_title(Some(&format!("云栈 CloudStack — {folder_name}")));
@@ -1163,17 +1160,16 @@ fn display_document(
         document.relative_path.clone()
     };
     widgets.status_label.set_label(&status);
-    let title = if dirty {
-        format!("* {} — 云栈 CloudStack", document.relative_path)
-    } else {
-        format!("{} — 云栈 CloudStack", document.relative_path)
-    };
-    widgets.window.set_title(Some(&title));
     let mut editor_state = state.borrow_mut();
     editor_state.loading_buffer = false;
     let epoch = editor_state.document_epoch;
     let context = editor_state.project.clone();
     drop(editor_state);
+    let project_name = context
+        .as_ref()
+        .map(|context| project_folder_name(&context.root));
+    let title = document_window_title(&document.relative_path, project_name.as_deref(), dirty);
+    widgets.window.set_title(Some(&title));
     if let Some(context) = context {
         widgets
             .preview
@@ -1188,6 +1184,24 @@ fn display_document(
         widgets.frontmatter_split.set_show_sidebar(true);
     }
     epoch
+}
+
+fn project_folder_name(root: &Path) -> String {
+    root.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.display().to_string())
+}
+
+fn document_window_title(relative_path: &str, project_name: Option<&str>, dirty: bool) -> String {
+    let document_name = if dirty {
+        format!("* {relative_path}")
+    } else {
+        relative_path.to_owned()
+    };
+    match project_name.filter(|name| !name.is_empty()) {
+        Some(project_name) => format!("{document_name} — 云栈 CloudStack — {project_name}"),
+        None => format!("{document_name} — 云栈 CloudStack"),
+    }
 }
 
 fn save_document(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
@@ -1492,6 +1506,22 @@ mod tests {
         assert_eq!(
             post_list_tooltip("nested/post.md", true),
             "nested/post.md（有未保存修改）"
+        );
+    }
+
+    #[test]
+    fn document_title_keeps_the_project_name_visible() {
+        assert_eq!(
+            document_window_title("nested/post.md", Some("test-blog"), false),
+            "nested/post.md — 云栈 CloudStack — test-blog"
+        );
+        assert_eq!(
+            document_window_title("nested/post.md", Some("test-blog"), true),
+            "* nested/post.md — 云栈 CloudStack — test-blog"
+        );
+        assert_eq!(
+            document_window_title("nested/post.md", None, false),
+            "nested/post.md — 云栈 CloudStack"
         );
     }
 }
