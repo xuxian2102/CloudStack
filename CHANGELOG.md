@@ -21,6 +21,7 @@
 
 - 原生项目以“云栈 CloudStack”在独立仓库继续维护；旧 Tauri 仓库保留为 legacy，
   `.blog-editor.json` 等内部标识继续兼容现有项目。
+- Arch 包更名为 `cloudstack-git`，安装时替换旧 `blog-editor-git` 包。
 - 删除 Tauri、React、CodeMirror、Node.js、pnpm 和 Vite 构建链。
 - Arch 包改为直接构建 Rust workspace；CI 精简为原生检查、release build、包检查和
   无 XWayland 的 GTK4/WebKitGTK smoke。
