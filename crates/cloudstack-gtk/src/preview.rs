@@ -201,6 +201,7 @@ impl Preview {
         let webview = webkit::WebView::builder()
             .web_context(&context)
             .user_content_manager(&content_manager)
+            .width_request(360)
             .hexpand(true)
             .vexpand(true)
             .build();

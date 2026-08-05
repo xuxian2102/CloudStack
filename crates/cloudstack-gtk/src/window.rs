@@ -17,6 +17,9 @@ use sourceview::prelude::*;
 use crate::search::SearchPanel;
 use crate::tasks;
 
+const DEFAULT_EDITOR_PANE_WIDTH: i32 = 570;
+const MIN_PREVIEW_PANE_WIDTH: i32 = 360;
+
 #[derive(Default)]
 struct EditorState {
     project: Option<ProjectContext>,
@@ -229,12 +232,24 @@ fn build_window(application: &adw::Application) -> Widgets {
 
     let content_split = gtk::Paned::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .position(570)
         .start_child(&editor_box)
         .end_child(preview.widget())
         .shrink_start_child(false)
         .shrink_end_child(false)
         .build();
+    let content_split_weak = content_split.downgrade();
+    content_split.connect_realize(move |_| {
+        let content_split_weak = content_split_weak.clone();
+        glib::idle_add_local_once(move || {
+            let Some(content_split) = content_split_weak.upgrade() else {
+                return;
+            };
+            content_split.set_position(initial_content_split_position(
+                content_split.min_position(),
+                content_split.max_position(),
+            ));
+        });
+    });
 
     let frontmatter_panel = gtk::Box::new(gtk::Orientation::Vertical, 12);
     frontmatter_panel.set_margin_top(16);
@@ -290,6 +305,15 @@ fn build_window(application: &adw::Application) -> Widgets {
         project_label,
         status_label,
     }
+}
+
+fn initial_content_split_position(minimum: i32, maximum: i32) -> i32 {
+    if maximum <= minimum {
+        return minimum;
+    }
+    DEFAULT_EDITOR_PANE_WIDTH
+        .min(maximum.saturating_sub(MIN_PREVIEW_PANE_WIDTH))
+        .clamp(minimum, maximum)
 }
 
 fn connect_source_style(buffer: &sourceview::Buffer) {
@@ -914,4 +938,17 @@ fn show_error(widgets: &Widgets, message: &str) {
         .priority(adw::ToastPriority::High)
         .build();
     widgets.toast_overlay.add_toast(toast);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_split_preserves_a_visible_preview() {
+        assert_eq!(initial_content_split_position(0, 1_400), 570);
+        assert_eq!(initial_content_split_position(0, 700), 340);
+        assert_eq!(initial_content_split_position(120, 400), 120);
+        assert_eq!(initial_content_split_position(0, 0), 0);
+    }
 }

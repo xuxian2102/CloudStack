@@ -6,6 +6,11 @@
 
 ## [0.2.1] - 2026-08-06
 
+### Fixed
+
+- 在窗口首次映射后重新应用编辑/预览分栏位置，并为预览保留最小宽度，避免高 DPI
+  Wayland 布局把实时预览压缩为零宽。
+
 ### Changed
 
 - Rust workspace、crate、二进制、GTK App ID、预览协议、E2E 与 Arch 安装产物统一使用
