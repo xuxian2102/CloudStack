@@ -1,6 +1,7 @@
 mod articles;
 mod drafts;
 mod frontmatter;
+mod git_panel;
 mod publish;
 
 use std::cell::RefCell;
@@ -8,7 +9,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use cloudstack_core::model::{PostDocument, PostSummary, ProjectContext};
+use cloudstack_core::model::{PostDocument, PostSummary, ProjectContext, RepositorySnapshot};
 use cloudstack_core::services::assets::PendingAssetManager;
 use cloudstack_core::services::{assets, posts, project};
 use gtk::{gdk, gio, glib};
@@ -31,6 +32,7 @@ struct EditorState {
     document_epoch: u64,
     draft_queue: drafts::DraftQueue,
     pending_assets: PendingAssetManager,
+    git_snapshot: Option<RepositorySnapshot>,
 }
 
 #[derive(Clone)]
@@ -38,6 +40,7 @@ struct Widgets {
     window: adw::ApplicationWindow,
     toast_overlay: adw::ToastOverlay,
     post_list: gtk::ListBox,
+    git_panel: git_panel::GitPanel,
     open_button: gtk::Button,
     new_button: gtk::Button,
     rename_button: gtk::Button,
@@ -75,6 +78,10 @@ pub fn present(application: &adw::Application) {
     #[cfg(feature = "e2e")]
     if let Some(root) = std::env::var_os("CLOUDSTACK_E2E_PROJECT") {
         open_project(&widgets, &state, Path::new(&root));
+    }
+    #[cfg(feature = "e2e")]
+    if std::env::var_os("CLOUDSTACK_E2E_GIT_EXPANDED").is_some() {
+        widgets.git_panel.set_expanded(true);
     }
 
     widgets.window.present();
@@ -132,6 +139,7 @@ fn build_window(application: &adw::Application) -> Widgets {
     let sidebar_scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .min_content_width(250)
+        .vexpand(true)
         .child(&post_list)
         .build();
 
@@ -170,7 +178,19 @@ fn build_window(application: &adw::Application) -> Widgets {
     sidebar_header.append(&delete_button);
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
     sidebar.append(&sidebar_header);
-    sidebar.append(&sidebar_scroll);
+    let git_panel = git_panel::GitPanel::new();
+    let sidebar_split = gtk::Paned::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .start_child(&sidebar_scroll)
+        .end_child(git_panel.widget())
+        .resize_start_child(true)
+        .resize_end_child(false)
+        .shrink_start_child(false)
+        .shrink_end_child(false)
+        .vexpand(true)
+        .build();
+    git_panel.bind_split(&sidebar_split);
+    sidebar.append(&sidebar_split);
 
     let buffer = sourceview::Buffer::builder()
         .enable_undo(true)
@@ -272,7 +292,7 @@ fn build_window(application: &adw::Application) -> Widgets {
 
     let split = gtk::Paned::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .position(230)
+        .position(290)
         .start_child(&sidebar)
         .end_child(&frontmatter_split)
         .shrink_start_child(false)
@@ -289,6 +309,7 @@ fn build_window(application: &adw::Application) -> Widgets {
         window,
         toast_overlay,
         post_list,
+        git_panel,
         open_button,
         new_button,
         rename_button,
@@ -483,6 +504,30 @@ fn connect_actions(
     });
     widgets.window.add_action(&publish_action);
 
+    let refresh_git_action = gio::SimpleAction::new("refresh-git", None);
+    let refresh_widgets = widgets.clone();
+    let refresh_state = Rc::clone(state);
+    refresh_git_action.connect_activate(move |_, _| {
+        git_panel::refresh(&refresh_widgets, &refresh_state);
+    });
+    widgets.window.add_action(&refresh_git_action);
+
+    let git_primary_action = gio::SimpleAction::new("git-primary", None);
+    let primary_widgets = widgets.clone();
+    let primary_state = Rc::clone(state);
+    git_primary_action.connect_activate(move |_, _| {
+        git_panel::activate_primary(&primary_widgets, &primary_state);
+    });
+    widgets.window.add_action(&git_primary_action);
+
+    let fetch_git_action = gio::SimpleAction::new("fetch-git", None);
+    let fetch_widgets = widgets.clone();
+    let fetch_state = Rc::clone(state);
+    fetch_git_action.connect_activate(move |_, _| {
+        git_panel::fetch_remote(&fetch_widgets, &fetch_state);
+    });
+    widgets.window.add_action(&fetch_git_action);
+
     let find_action = gio::SimpleAction::new("find", None);
     let search_panel = widgets.search_panel.clone();
     find_action.connect_activate(move |_, _| search_panel.open(false));
@@ -622,6 +667,7 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
                     let mut editor_state = state.borrow_mut();
                     editor_state.loading_buffer = true;
                     editor_state.project = Some(context);
+                    editor_state.git_snapshot = None;
                     editor_state.posts = post_summaries;
                     editor_state.document = None;
                     editor_state.dirty = false;
@@ -634,6 +680,7 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
                     widgets.frontmatter_split.set_show_sidebar(false);
                     widgets.window.set_title(Some("云栈 CloudStack"));
                     frontmatter::refresh(&widgets, &state);
+                    git_panel::refresh(&widgets, &state);
                 }
                 Err(error) => show_error(&widgets, &error.to_string()),
             }
@@ -815,6 +862,7 @@ fn save_document_then(
             }
             set_busy(&widgets, &state, false, "");
             if continue_after_save {
+                git_panel::refresh(&widgets, &state);
                 if let Some(on_saved) = on_saved {
                     on_saved();
                 }
@@ -889,6 +937,10 @@ fn sync_controls(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     widgets
         .publish_button
         .set_sensitive(has_project && !state.busy);
+    widgets.git_panel.set_project_available(has_project);
+    widgets
+        .git_panel
+        .reflect_unsaved_editor(state.dirty, has_project && !state.busy);
     if !has_document {
         widgets.frontmatter_split.set_show_sidebar(false);
     }

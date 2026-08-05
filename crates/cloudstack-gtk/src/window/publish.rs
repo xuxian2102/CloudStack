@@ -5,7 +5,9 @@ use adw::prelude::*;
 use cloudstack_core::model::{ChangeKind, GitStatus, PublishResult};
 use cloudstack_core::services::git;
 
-use super::{set_busy, show_error, toast, EditorState, Widgets};
+use super::{
+    git_panel, git_panel::operation_log, set_busy, show_error, toast, EditorState, Widgets,
+};
 use crate::tasks;
 
 struct PublishDialog {
@@ -18,6 +20,7 @@ struct PublishDialog {
     publish_button: gtk::Button,
     spinner: gtk::Spinner,
     result_label: gtk::Label,
+    trace_buffer: gtk::TextBuffer,
     status_allows_publish: Cell<bool>,
     has_upstream: Cell<bool>,
     working: Cell<bool>,
@@ -66,6 +69,29 @@ impl PublishDialog {
         form.append(&push_check);
         form.append(&result_label);
 
+        let trace_buffer = gtk::TextBuffer::new(None);
+        let trace_view = gtk::TextView::builder()
+            .buffer(&trace_buffer)
+            .editable(false)
+            .cursor_visible(false)
+            .monospace(true)
+            .wrap_mode(gtk::WrapMode::WordChar)
+            .left_margin(8)
+            .right_margin(8)
+            .top_margin(8)
+            .bottom_margin(8)
+            .build();
+        let trace_scroll = gtk::ScrolledWindow::builder()
+            .min_content_height(120)
+            .max_content_height(220)
+            .child(&trace_view)
+            .build();
+        let trace_expander = gtk::Expander::builder()
+            .label("执行记录")
+            .child(&trace_scroll)
+            .build();
+        form.append(&trace_expander);
+
         let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
         content.set_margin_top(18);
         content.set_margin_bottom(18);
@@ -107,6 +133,7 @@ impl PublishDialog {
             publish_button,
             spinner,
             result_label,
+            trace_buffer,
             status_allows_publish: Cell::new(false),
             has_upstream: Cell::new(false),
             working: Cell::new(false),
@@ -166,10 +193,14 @@ impl PublishDialog {
             .changes
             .iter()
             .any(|change| change.kind == ChangeKind::Unmerged);
-        self.status_allows_publish.set(has_managed && !has_conflict);
+        self.status_allows_publish
+            .set(has_managed && !has_conflict && status.behind == 0);
         if has_conflict && self.result_label.label().is_empty() {
             self.result_label
                 .set_label("存在未解决的 Git 冲突，必须先在外部解决。")
+        } else if status.behind > 0 && self.result_label.label().is_empty() {
+            self.result_label
+                .set_label("远端含有本地没有的提交；为避免制造分叉，必须先处理同步状态。")
         } else if !has_managed && self.result_label.label().is_empty() {
             self.result_label.set_label("没有受管改动可提交。")
         }
@@ -267,6 +298,9 @@ fn present_dialog(
                         task_dialog
                             .result_label
                             .set_label(&publish_summary(&result, push));
+                        task_dialog
+                            .trace_buffer
+                            .set_text(&operation_log(&result.report));
                         if result.error.is_none() {
                             toast(&task_widgets, "Git 提交发布完成");
                         } else {
@@ -310,6 +344,7 @@ fn refresh_status(
                 Ok(status) => dialog.apply_status(&status),
                 Err(error) => show_error(&widgets, &format!("刷新 Git 状态失败：{error}")),
             }
+            git_panel::refresh(&widgets, &state);
         },
     );
 }
@@ -379,11 +414,30 @@ mod tests {
             error: Some(cloudstack_core::error::ErrorPayload::git_push_failed(
                 "推送失败",
             )),
+            report: Default::default(),
         };
         let summary = publish_summary(&result, true);
         assert!(summary.contains("暂存：1"));
         assert!(summary.contains("提交：abc123"));
         assert!(summary.contains("停止阶段：push"));
         assert!(summary.contains("推送失败"));
+    }
+
+    #[test]
+    fn operation_log_keeps_commands_and_outputs() {
+        let report = cloudstack_core::model::OperationReport {
+            traces: vec![cloudstack_core::model::CommandTrace {
+                command: "git push".into(),
+                stdout: "ok\n".into(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                success: true,
+                duration_ms: 12,
+            }],
+        };
+        let log = operation_log(&report);
+        assert!(log.contains("$ git push"));
+        assert!(log.contains("退出: 0"));
+        assert!(log.contains("ok"));
     }
 }

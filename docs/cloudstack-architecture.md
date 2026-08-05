@@ -69,13 +69,23 @@ Frontmatter 可以缺省。添加时按项目字段配置生成默认值；日�
 
 ## Git 发布
 
-发布前若文章 dirty，必须先完成同一 revision 保护的保存。状态与发布均在后台执行。
-对话框展示 branch、upstream、ahead/behind、受管和非受管改动；只有内容目录和项目
-实际采用的配置文件会被暂存。新项目使用 `.cloudstack.json`，旧项目可继续原地使用
-`.blog-editor.json`。未解决冲突、空提交信息或没有受管改动时停止。
+左侧底部 Git 停靠区默认折叠为一行，保留分支/upstream、改动数和当前主操作；展开后
+显示仓库拓扑、同步关系、远端和逐项改动，并可拖动分隔线改变高度。面板据此选择初始化、
+提交、配置远端、首次推送、push 或纯快进同步。Git/gh 检测、状态与操作均在后台执行；
+`gh auth login` 仍由用户在终端完成。
 
-发布按 stage → commit → 可选 push 执行，结果保留已经成功的阶段。push 失败不会伪装
-成 commit 失败，UI 会刷新状态并显示 commit hash 与具体停止阶段。
+所有提交通过同一个 `ManagedScope` 生成明确路径列表，只包含项目实际配置文件和
+`contentDir` 下由 Git status 返回的改动。不存在 `git add .` 或 `git add -A` 路径。
+项目目录必须等于 Git top-level；如果只检测到父目录仓库，所有写操作都会停止。
+
+每条外部命令生成 `CommandTrace`，记录脱敏命令、stdout/stderr、退出码与耗时。发布按
+stage → commit → 可选 push 执行并保留部分成功；GitHub 建仓失败同样只报告当前状态，
+不会自动删除可能已经创建的远端仓库。
+
+远端更新只允许 `pull --ff-only`，而且要求 upstream 存在、本地不 ahead、整个工作区
+干净。behind 加本地改动、diverged、冲突、认证和任何非 fast-forward 情况都停止，
+不自动 stash、merge、rebase 或强推。HTTPS 凭据助手只在用户明确勾选后通过
+`gh auth setup-git --hostname github.com` 配置。
 
 ## 验证
 

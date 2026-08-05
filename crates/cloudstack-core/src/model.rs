@@ -172,6 +172,116 @@ pub struct GitStatus {
     pub changes: Vec<FileChange>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryTopology {
+    NotInitialized,
+    ParentRepository,
+    NoCommit,
+    NoRemote,
+    NoUpstream,
+    Tracking,
+    Detached,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncRelation {
+    Unknown,
+    Synced,
+    Ahead,
+    Behind,
+    Diverged,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeState {
+    pub managed_changes: usize,
+    pub unmanaged_changes: usize,
+    pub staged_changes: usize,
+    pub has_conflicts: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitEnvironment {
+    pub git_available: bool,
+    pub gh_available: bool,
+    pub gh_authenticated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitIdentity {
+    pub name: String,
+    pub email: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRemote {
+    pub name: String,
+    /// 已脱敏；URL userinfo 永远不会进入公开状态模型。
+    pub url: Option<String>,
+}
+
+impl WorktreeState {
+    pub fn is_clean(self) -> bool {
+        self.managed_changes == 0 && self.unmanaged_changes == 0 && !self.has_conflicts
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositorySnapshot {
+    pub environment: GitEnvironment,
+    pub identity: Option<GitIdentity>,
+    pub topology: RepositoryTopology,
+    pub sync: SyncRelation,
+    pub worktree: WorktreeState,
+    pub remotes: Vec<GitRemote>,
+    pub status: GitStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandTrace {
+    /// 已脱敏、可直接展示的命令行。
+    pub command: String,
+    /// stdout/stderr 在进入此结构前已经完成脱敏。
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+    pub success: bool,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationReport {
+    pub traces: Vec<CommandTrace>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitOperationResult {
+    pub report: OperationReport,
+    pub error: Option<String>,
+}
+
+impl GitOperationResult {
+    pub fn succeeded(&self) -> bool {
+        self.error.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepositoryVisibility {
+    Private,
+    Public,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishResult {
@@ -183,6 +293,7 @@ pub struct PublishResult {
     /// "stage" | "commit" | "push"，None 表示全部成功（或未尝试推送）
     pub error_stage: Option<String>,
     pub error: Option<ErrorPayload>,
+    pub report: OperationReport,
 }
 
 #[cfg(test)]
@@ -200,6 +311,7 @@ mod tests {
             pushed: false,
             error_stage: Some("stage".into()),
             error: Some(ErrorPayload::git_nothing_to_commit("没有可提交的改动")),
+            report: Default::default(),
         })
         .unwrap();
 

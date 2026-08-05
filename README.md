@@ -18,11 +18,14 @@
 - Frontmatter 默认隐藏在右侧属性抽屉，日期使用 GTK 日历选择；
 - Wayland 剪贴板图片粘贴、文章同名资产目录和安全的本地图片预览；
 - 新建、重命名、可恢复删除、外部修改冲突检测和崩溃草稿恢复；
-- 展示 Git 分支/upstream/ahead-behind，只提交受管文件并可选择推送；
+- 左侧常驻 Git 状态与应用内初始化、远端、GitHub 建仓、提交、推送和纯快进同步；
 - 深浅主题、编辑/预览双向比例滚动和公式错误源码跳转。
 
 项目不支持 X11/XWayland、其他 Linux 发行版、Windows、macOS、MDX、Mermaid、
 插件或远程图片加载。
+
+GitHub 建仓功能可选依赖 `github-cli`，并要求用户先在终端完成 `gh auth login`；应用
+不会读取或展示 token，也不会代替用户处理登录。
 
 ## 安装
 

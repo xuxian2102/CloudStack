@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- 左侧文章栏增加可折叠、可纵向拖动的 Git 停靠区；折叠时保留分支、改动数和主操作，
+  展开后显示远端、同步状态与逐项改动，并按仓库拓扑推导安全操作。
+- 增加应用内 Git 初始化、仓库级提交身份、origin、GitHub 建仓、首次推送、fetch、普通
+  push 和 `pull --ff-only` 流程；所有外部命令均展示脱敏后的命令、输出、退出码与耗时。
+
+### Security
+
+- 首次提交与日常提交统一使用配置文件和 `contentDir` 受管路径白名单，不执行
+  `git add .` 或 `git add -A`。
+- 禁止凭据终端/AskPass 交互、拒绝内嵌 HTTPS 凭据，并拒绝误操作项目上层的 Git 仓库。
+- behind、diverged、冲突或脏工作区不满足纯快进条件时停止自动同步，不自动 stash、
+  rebase、merge、强推或删除部分创建成功的 GitHub 仓库。
+
 ## [0.2.1] - 2026-08-06
 
 ### Fixed

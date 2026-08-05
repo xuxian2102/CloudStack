@@ -5,7 +5,8 @@ use adw::prelude::*;
 use cloudstack_core::services::posts;
 
 use super::{
-    display_document, drafts, populate_post_list, set_busy, show_error, toast, EditorState, Widgets,
+    display_document, drafts, git_panel, populate_post_list, set_busy, show_error, toast,
+    EditorState, Widgets,
 };
 use crate::tasks;
 
@@ -84,6 +85,7 @@ fn create_post(
                 Err(error) => show_error(&widgets, &error.to_string()),
             }
             set_busy(&widgets, &state, false, "");
+            git_panel::refresh(&widgets, &state);
         },
     );
 }
@@ -175,6 +177,7 @@ fn rename_post(
                 Err(error) => show_error(&widgets, &error.to_string()),
             }
             set_busy(&widgets, &state, false, "");
+            git_panel::refresh(&widgets, &state);
         },
     );
 }
@@ -253,6 +256,7 @@ fn delete_post(
                 Err(error) => show_error(&widgets, &error.to_string()),
             }
             set_busy(&widgets, &state, false, "");
+            git_panel::refresh(&widgets, &state);
         },
     );
 }
