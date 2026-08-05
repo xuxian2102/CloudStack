@@ -1,0 +1,26 @@
+[package]
+name = "blog-editor-gtk"
+description = "CloudStack 的原生 GTK4/libadwaita 桌面应用"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "blog-editor"
+path = "src/main.rs"
+
+[features]
+default = []
+# 只用于隔离的 Wayland 端到端测试；正常构建不会从环境变量自动打开项目。
+e2e = []
+
+[dependencies]
+blog-editor-core = { path = "../blog-core" }
+blog-editor-renderer = { path = "../blog-renderer" }
+gtk = { package = "gtk4", version = "0.11.4", features = ["v4_18"] }
+adw = { package = "libadwaita", version = "0.9.2", features = ["v1_7"] }
+log.workspace = true
+sourceview = { package = "sourceview5", version = "0.11.2" }
+webkit = { package = "webkit6", version = "0.6.1" }

@@ -1,0 +1,70 @@
+# Maintainer: xuxian
+pkgname=cloudstack-git
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="CloudStack native GTK4 Markdown editor for Arch Linux Wayland"
+arch=('x86_64')
+url="https://github.com/xuxian2102/CloudStack"
+license=('Apache-2.0')
+depends=(
+  'cairo'
+  'gdk-pixbuf2'
+  'glib2'
+  'glibc'
+  'gtk4'
+  'gtksourceview5'
+  'gcc-libs'
+  'libadwaita'
+  'libsoup3'
+  'webkitgtk-6.0'
+  'xdg-utils'
+)
+makedepends=(
+  'git'
+  'rust'
+)
+optdepends=('git: enable the built-in status, commit, and push workflow')
+provides=("cloudstack=${pkgver}" "blog-editor=${pkgver}")
+conflicts=('cloudstack' 'blog-editor' 'blog-editor-git')
+source=('cloudstack::git+https://github.com/xuxian2102/CloudStack.git#branch=main')
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$srcdir/cloudstack"
+  local _version
+  _version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+  printf '%s.r%s.g%s' \
+    "$_version" \
+    "$(git rev-list --count HEAD)" \
+    "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+  cd "$srcdir/cloudstack"
+  export CARGO_HOME="$srcdir/cargo-home"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$srcdir=/usr/src/debug/$pkgname"
+
+  cargo build --locked --release --workspace
+}
+
+package() {
+  cd "$srcdir/cloudstack"
+
+  install -Dm755 "$srcdir/target/release/blog-editor" \
+    "$pkgdir/usr/lib/cloudstack/blog-editor"
+  install -Dm755 packaging/arch/blog-editor.sh \
+    "$pkgdir/usr/bin/cloudstack"
+  install -Dm644 packaging/arch/dev.xuxian.blogeditor.desktop \
+    "$pkgdir/usr/share/applications/dev.xuxian.blogeditor.desktop"
+  install -Dm644 packaging/arch/icons/32x32.png \
+    "$pkgdir/usr/share/icons/hicolor/32x32/apps/dev.xuxian.blogeditor.png"
+  install -Dm644 packaging/arch/icons/128x128.png \
+    "$pkgdir/usr/share/icons/hicolor/128x128/apps/dev.xuxian.blogeditor.png"
+  install -Dm644 packaging/arch/icons/256x256.png \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/dev.xuxian.blogeditor.png"
+  install -Dm644 packaging/arch/icons/512x512.png \
+    "$pkgdir/usr/share/icons/hicolor/512x512/apps/dev.xuxian.blogeditor.png"
+  install -Dm644 LICENSE \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "contentDir": "src/content/blog",
+  "extensions": [".md"],
+  "frontmatter": {
+    "fields": [
+      { "name": "title", "type": "string", "required": true },
+      { "name": "pubDate", "type": "date", "required": true },
+      { "name": "draft", "type": "boolean", "default": false },
+      { "name": "tags", "type": "tags" }
+    ]
+  },
+  "assets": {
+    "mode": "colocated"
+  }
+}

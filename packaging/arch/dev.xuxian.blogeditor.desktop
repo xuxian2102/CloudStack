@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=云栈 CloudStack
+GenericName=Markdown Editor
+Comment=Write Markdown notes and publish a blog from native Wayland
+Exec=cloudstack
+Icon=dev.xuxian.blogeditor
+Terminal=false
+Categories=Utility;TextEditor;
+Keywords=Markdown;Notes;Blog;CloudStack;
+StartupNotify=true

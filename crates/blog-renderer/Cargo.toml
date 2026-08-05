@@ -1,0 +1,14 @@
+[package]
+name = "blog-editor-renderer"
+description = "CloudStack 的纯 Rust Markdown 与数学渲染层"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+blog-editor-core = { path = "../blog-core" }
+katex-rs = "0.2.4"
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
+rust-embed = "8.9.0"

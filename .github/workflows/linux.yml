@@ -1,0 +1,81 @@
+name: Arch Wayland CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:base-devel
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Install native dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --needed --noconfirm \
+            git rust gtk4 libadwaita gtksourceview5 webkitgtk-6.0 \
+            sway dbus desktop-file-utils namcap ttf-dejavu
+          setcap -r /usr/bin/sway
+          useradd --create-home --shell /bin/bash blog-editor-ci
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./ -> target"
+          cache-bin: false
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check workspace
+        run: cargo check --workspace --locked
+
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Test workspace
+        run: cargo test --workspace --all-features --locked
+
+      - name: Build release workspace
+        run: cargo build --workspace --release --locked
+
+      - name: Check Arch package metadata
+        run: |
+          bash -n packaging/arch/PKGBUILD
+          sh -n packaging/arch/blog-editor.sh
+          desktop-file-validate packaging/arch/dev.xuxian.blogeditor.desktop
+          runuser --user blog-editor-ci -- \
+            env HOME=/home/blog-editor-ci \
+            makepkg --printsrcinfo --dir "$GITHUB_WORKSPACE/packaging/arch" >/dev/null
+          namcap_result=$(namcap packaging/arch/PKGBUILD)
+          if [[ -n "$namcap_result" ]]; then
+            printf '%s\n' "$namcap_result"
+            exit 1
+          fi
+
+      - name: Build Wayland smoke binary
+        run: cargo build -p blog-editor-gtk --features e2e --bin blog-editor --locked
+
+      - name: Smoke test native GTK application
+        run: |
+          runuser --user blog-editor-ci -- \
+            env -u DISPLAY -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS \
+            HOME=/home/blog-editor-ci PATH="$PATH" \
+            bash test/native-wayland-smoke.sh target/debug/blog-editor
