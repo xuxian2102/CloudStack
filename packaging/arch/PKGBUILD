@@ -1,6 +1,6 @@
 # Maintainer: xuxian
 pkgname=cloudstack-git
-pkgver=0.2.1.r6.g941d88f
+pkgver=0.2.2
 pkgrel=1
 pkgdesc="CloudStack native GTK4 Markdown editor for Arch Linux Wayland"
 arch=('x86_64')
@@ -20,7 +20,10 @@ makedepends=(
   'git'
   'rust'
 )
-optdepends=('git: enable the built-in status, commit, and push workflow')
+optdepends=(
+  'git: enable the built-in status, commit, and push workflow'
+  'github-cli: create GitHub repositories from the built-in Git workflow'
+)
 provides=("cloudstack=${pkgver}" "blog-editor=${pkgver}")
 conflicts=('cloudstack' 'blog-editor' 'blog-editor-git')
 replaces=('blog-editor-git')

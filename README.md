@@ -3,7 +3,7 @@
 [![Arch Wayland CI](https://github.com/xuxian2102/CloudStack/actions/workflows/linux.yml/badge.svg)](https://github.com/xuxian2102/CloudStack/actions/workflows/linux.yml)
 
 云栈（CloudStack）是一个只面向 **Arch Linux rolling + 原生 Wayland** 的个人 Markdown
-编辑器。`v0.2.1` 使用纯 Rust、GTK4、libadwaita、GtkSourceView 5 和 WebKitGTK 6，
+编辑器。`v0.2.2` 使用纯 Rust、GTK4、libadwaita、GtkSourceView 5 和 WebKitGTK 6，
 不再包含 Tauri、React、Node.js 或 Vite 构建链。
 
 早期 Tauri 版本及其历史保留在
@@ -15,10 +15,10 @@
 
 - GtkSourceView 源码编辑、Markdown 高亮、查找替换和原生撤销栈；
 - WebKitGTK 双栏实时预览，Markdown 与 KaTeX 公式全部在 Rust 中静态渲染；
-- Frontmatter 默认隐藏在右侧属性抽屉，日期使用 GTK 日历选择；
+- Frontmatter 默认隐藏在右侧属性抽屉，日期使用年月日选择器，Tags 显示为可移除标签块；
 - Wayland 剪贴板图片粘贴、文章同名资产目录和安全的本地图片预览；
 - 新建、重命名、可恢复删除、外部修改冲突检测和崩溃草稿恢复；
-- 左侧常驻 Git 状态与应用内初始化、远端、GitHub 建仓、提交、推送和纯快进同步；
+- 左侧常驻 Git 状态与应用内初始化、远端、GitHub 建仓、按文章提交、推送和纯快进同步；
 - 深浅主题、编辑/预览双向比例滚动和公式错误源码跳转。
 
 项目不支持 X11/XWayland、其他 Linux 发行版、Windows、macOS、MDX、Mermaid、
@@ -46,9 +46,10 @@ sudo pacman -Rns cloudstack-git
 
 ## 博客项目配置
 
-要打开的目录需要包含 `.cloudstack.json`；只有旧配置时会原地读写
-`.blog-editor.json`，不会自动改名。两个文件同时存在时应用会要求只保留一个。
-编辑器也可以作为普通笔记工具使用；项目目录和文章扩展名不依赖 Astro。最小配置：
+直接打开一个普通文件夹即可开始：如果目录中还没有配置，CloudStack 会识别常见文章
+目录并询问是否创建 `.cloudstack.json`，也可以同时加入常用博客属性。只有旧配置时会原地
+读写 `.blog-editor.json`，不会自动改名；两个文件同时存在时应用会要求只保留一个。
+编辑器也可以作为普通笔记工具使用；项目目录和文章扩展名不依赖 Astro。手工配置示例：
 
 ```json
 {
@@ -63,12 +64,18 @@ sudo pacman -Rns cloudstack-git
       { "name": "tags", "type": "tags" }
     ]
   },
-  "assets": { "mode": "colocated" }
+  "assets": { "mode": "colocated" },
+  "git": { "excludedArticles": [] }
 }
 ```
 
 Frontmatter 可以按文章一键添加或移除；未配置字段、YAML 注释、字段顺序和引号风格
 会在修改已配置字段时保留。
+
+`.cloudstack.json`/`.blog-editor.json` 只保存本机编辑器设置，不属于博客内容。CloudStack
+会把它们加入当前 checkout 的 `.git/info/exclude`；如果旧项目已经跟踪配置，可在 Git
+面板执行“停止跟踪配置”。发布窗口只暂存勾选文章及其同名图片目录，选择可记入本地
+配置长期保留；`.env`、构建产物和其他项目文件始终显示为非受管，不会被应用提交。
 
 ## 开发
 

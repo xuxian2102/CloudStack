@@ -53,6 +53,8 @@ pub struct ProjectConfig {
     pub frontmatter: FrontmatterConfig,
     #[serde(default)]
     pub assets: AssetsConfig,
+    #[serde(default)]
+    pub git: GitPreferences,
 }
 
 impl Default for ProjectConfig {
@@ -63,6 +65,7 @@ impl Default for ProjectConfig {
             extensions: default_extensions(),
             frontmatter: FrontmatterConfig::default(),
             assets: AssetsConfig::default(),
+            git: GitPreferences::default(),
         }
     }
 }
@@ -86,6 +89,14 @@ pub struct FrontmatterConfig {
 pub struct AssetsConfig {
     #[serde(default)]
     pub mode: AssetMode,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPreferences {
+    /// 文章相对 contentDir 的 ID；配置文件是本地状态，本清单不会被 CloudStack 提交。
+    #[serde(default)]
+    pub excluded_articles: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,6 +252,7 @@ pub struct RepositorySnapshot {
     pub sync: SyncRelation,
     pub worktree: WorktreeState,
     pub remotes: Vec<GitRemote>,
+    pub config_tracked: bool,
     pub status: GitStatus,
 }
 

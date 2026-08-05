@@ -20,6 +20,9 @@ pub mod code {
     pub const NO_PROJECT: ErrorCode = ErrorCode::new("no_project", &[]);
     pub const STALE_PROJECT_SESSION: ErrorCode = ErrorCode::new("stale_project_session", &[]);
     pub const INVALID_PROJECT: ErrorCode = ErrorCode::new("invalid_project", &["detail"]);
+    pub const MISSING_PROJECT_CONFIG: ErrorCode = ErrorCode::new("missing_project_config", &[]);
+    pub const MISSING_CONTENT_DIRECTORY: ErrorCode =
+        ErrorCode::new("missing_content_directory", &["path"]);
     pub const CONFIG: ErrorCode = ErrorCode::new("config", &["detail"]);
     pub const INVALID_POST_ID: ErrorCode = ErrorCode::new("invalid_post_id", &["id"]);
     pub const NOT_FOUND: ErrorCode = ErrorCode::new("not_found", &["id"]);
@@ -45,6 +48,8 @@ pub mod code {
         NO_PROJECT,
         STALE_PROJECT_SESSION,
         INVALID_PROJECT,
+        MISSING_PROJECT_CONFIG,
+        MISSING_CONTENT_DIRECTORY,
         CONFIG,
         INVALID_POST_ID,
         NOT_FOUND,
@@ -136,6 +141,10 @@ pub enum AppError {
     StaleProjectSession,
     #[error("项目目录无效：{0}")]
     InvalidProject(String),
+    #[error("项目还没有 CloudStack 配置")]
+    MissingProjectConfig,
+    #[error("文章目录不存在：{0}")]
+    MissingContentDirectory(String),
     #[error("配置文件错误：{0}")]
     Config(String),
     #[error("非法的文章标识：{0}")]
@@ -160,6 +169,8 @@ impl AppError {
             AppError::NoProject => code::NO_PROJECT,
             AppError::StaleProjectSession => code::STALE_PROJECT_SESSION,
             AppError::InvalidProject(_) => code::INVALID_PROJECT,
+            AppError::MissingProjectConfig => code::MISSING_PROJECT_CONFIG,
+            AppError::MissingContentDirectory(_) => code::MISSING_CONTENT_DIRECTORY,
             AppError::Config(_) => code::CONFIG,
             AppError::InvalidPostId(_) => code::INVALID_POST_ID,
             AppError::NotFound(_) => code::NOT_FOUND,
@@ -176,14 +187,22 @@ impl AppError {
         match self {
             AppError::NoProject
             | AppError::StaleProjectSession
+            | AppError::MissingProjectConfig
             | AppError::ExternalModificationConflict => payload,
             AppError::InvalidProject(detail)
             | AppError::Config(detail)
             | AppError::Io(detail)
             | AppError::Clipboard(detail)
             | AppError::Git(detail) => payload.with_param("detail", detail.clone()),
-            AppError::InvalidPostId(id) | AppError::NotFound(id) => {
-                payload.with_param("id", id.clone())
+            AppError::MissingContentDirectory(id)
+            | AppError::InvalidPostId(id)
+            | AppError::NotFound(id) => {
+                let key = if matches!(self, AppError::MissingContentDirectory(_)) {
+                    "path"
+                } else {
+                    "id"
+                };
+                payload.with_param(key, id.clone())
             }
             AppError::AlreadyExists(target) => payload.with_param("target", target.clone()),
         }

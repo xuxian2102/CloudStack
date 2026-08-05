@@ -5,13 +5,13 @@ mod git_panel;
 mod publish;
 
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use adw::prelude::*;
 use cloudstack_core::model::{PostDocument, PostSummary, ProjectContext, RepositorySnapshot};
 use cloudstack_core::services::assets::PendingAssetManager;
-use cloudstack_core::services::{assets, posts, project};
+use cloudstack_core::services::{assets, git, posts, project};
 use gtk::{gdk, gio, glib};
 use sourceview::prelude::*;
 
@@ -35,6 +35,18 @@ struct EditorState {
     git_snapshot: Option<RepositorySnapshot>,
 }
 
+enum OpenProjectOutcome {
+    Opened(ProjectContext, Vec<PostSummary>),
+    NeedsInitialization {
+        root: PathBuf,
+        suggested_content_dir: String,
+    },
+    NeedsContentRepair {
+        root: PathBuf,
+        content_dir: String,
+    },
+}
+
 #[derive(Clone)]
 struct Widgets {
     window: adw::ApplicationWindow,
@@ -52,7 +64,6 @@ struct Widgets {
     frontmatter_panel: gtk::Box,
     frontmatter_split: adw::OverlaySplitView,
     properties_button: gtk::Button,
-    publish_button: gtk::Button,
     save_button: gtk::Button,
     project_label: gtk::Label,
     status_label: gtk::Label,
@@ -83,7 +94,6 @@ pub fn present(application: &adw::Application) {
     if std::env::var_os("CLOUDSTACK_E2E_GIT_EXPANDED").is_some() {
         widgets.git_panel.set_expanded(true);
     }
-
     widgets.window.present();
 }
 
@@ -97,14 +107,19 @@ fn build_window(application: &adw::Application) -> Widgets {
 
     let open_button = gtk::Button::builder()
         .icon_name("document-open-symbolic")
-        .tooltip_text("打开博客项目 (Ctrl+O)")
+        .tooltip_text("打开项目文件夹 (Ctrl+O)")
         .action_name("win.open-project")
         .build();
-    let save_button = gtk::Button::builder()
+    let save_content = adw::ButtonContent::builder()
         .icon_name("document-save-symbolic")
+        .label("保存")
+        .build();
+    let save_button = gtk::Button::builder()
+        .child(&save_content)
         .tooltip_text("保存文章 (Ctrl+S)")
         .action_name("win.save")
         .sensitive(false)
+        .css_classes(["suggested-action"])
         .build();
     let properties_button = gtk::Button::builder()
         .icon_name("document-properties-symbolic")
@@ -112,13 +127,6 @@ fn build_window(application: &adw::Application) -> Widgets {
         .action_name("win.toggle-properties")
         .sensitive(false)
         .build();
-    let publish_button = gtk::Button::builder()
-        .icon_name("send-to-symbolic")
-        .tooltip_text("提交与推送")
-        .action_name("win.publish")
-        .sensitive(false)
-        .build();
-
     let project_label = gtk::Label::builder()
         .label("尚未打开项目")
         .ellipsize(gtk::pango::EllipsizeMode::Middle)
@@ -128,7 +136,6 @@ fn build_window(application: &adw::Application) -> Widgets {
     let header = adw::HeaderBar::new();
     header.pack_start(&open_button);
     header.pack_start(&project_label);
-    header.pack_end(&publish_button);
     header.pack_end(&properties_button);
     header.pack_end(&save_button);
 
@@ -223,7 +230,9 @@ fn build_window(application: &adw::Application) -> Widgets {
         .left_margin(32)
         .right_margin(32)
         .build();
-    buffer.set_text("打开一个博客项目以开始编辑。\n\n项目根目录需要包含 .cloudstack.json（旧项目也支持 .blog-editor.json）。\n");
+    buffer.set_text(
+        "打开一个文件夹以开始编辑。\n\n如果还没有 CloudStack 配置，应用会引导你创建基本项目。\n",
+    );
 
     let editor_scroll = gtk::ScrolledWindow::builder()
         .hexpand(true)
@@ -321,7 +330,6 @@ fn build_window(application: &adw::Application) -> Widgets {
         frontmatter_panel,
         frontmatter_split,
         properties_button,
-        publish_button,
         save_button,
         project_label,
         status_label,
@@ -528,6 +536,14 @@ fn connect_actions(
     });
     widgets.window.add_action(&fetch_git_action);
 
+    let untrack_config_action = gio::SimpleAction::new("untrack-config", None);
+    let untrack_widgets = widgets.clone();
+    let untrack_state = Rc::clone(state);
+    untrack_config_action.connect_activate(move |_, _| {
+        git_panel::untrack_config(&untrack_widgets, &untrack_state);
+    });
+    widgets.window.add_action(&untrack_config_action);
+
     let find_action = gio::SimpleAction::new("find", None);
     let search_panel = widgets.search_panel.clone();
     find_action.connect_activate(move |_, _| search_panel.open(false));
@@ -649,14 +665,34 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
     let widgets = widgets.clone();
     let state = Rc::clone(state);
     tasks::run(
-        move || {
-            let context = project::open_project(&path)?;
-            let post_summaries = posts::list_posts(&context)?;
-            Ok((context, post_summaries))
+        move || match project::open_project(&path) {
+            Ok(context) => {
+                // CloudStack 配置是编辑器本地状态；对独立 Git 项目自动写入
+                // repository-local exclude，避免第一次打开就把配置列为待提交文件。
+                let _ = git::ensure_local_config_excluded(&context);
+                let post_summaries = posts::list_posts(&context)?;
+                Ok(OpenProjectOutcome::Opened(context, post_summaries))
+            }
+            Err(cloudstack_core::error::AppError::MissingProjectConfig) => {
+                let suggested_content_dir = project::suggest_content_dir(&path)?;
+                Ok(OpenProjectOutcome::NeedsInitialization {
+                    root: path,
+                    suggested_content_dir,
+                })
+            }
+            Err(cloudstack_core::error::AppError::MissingContentDirectory(content_dir)) => {
+                Ok(OpenProjectOutcome::NeedsContentRepair {
+                    root: path,
+                    content_dir,
+                })
+            }
+            Err(error) => Err(error),
         },
         move |result| {
+            let mut initialization = None;
+            let mut content_repair = None;
             match result {
-                Ok((context, post_summaries)) => {
+                Ok(OpenProjectOutcome::Opened(context, post_summaries)) => {
                     populate_post_list(&widgets, &post_summaries);
                     widgets
                         .project_label
@@ -677,20 +713,214 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
                     widgets.buffer.set_text("从左侧选择一篇文章。\n");
                     state.borrow_mut().loading_buffer = false;
                     widgets.preview.clear(epoch);
+                    #[cfg(feature = "e2e")]
+                    widgets.frontmatter_split.set_show_sidebar(
+                        std::env::var_os("CLOUDSTACK_E2E_PROPERTIES_OPEN").is_some(),
+                    );
+                    #[cfg(not(feature = "e2e"))]
                     widgets.frontmatter_split.set_show_sidebar(false);
                     widgets.window.set_title(Some("云栈 CloudStack"));
                     frontmatter::refresh(&widgets, &state);
                     git_panel::refresh(&widgets, &state);
                 }
+                Ok(OpenProjectOutcome::NeedsInitialization {
+                    root,
+                    suggested_content_dir,
+                }) => initialization = Some((root, suggested_content_dir)),
+                Ok(OpenProjectOutcome::NeedsContentRepair { root, content_dir }) => {
+                    content_repair = Some((root, content_dir));
+                }
                 Err(error) => show_error(&widgets, &error.to_string()),
             }
             set_busy(&widgets, &state, false, "");
+            if let Some((root, suggested_content_dir)) = initialization {
+                show_project_initialization_dialog(&widgets, &state, root, &suggested_content_dir);
+                return;
+            }
+            if let Some((root, content_dir)) = content_repair {
+                show_content_repair_dialog(&widgets, &state, root, &content_dir);
+                #[cfg(feature = "e2e")]
+                return;
+            }
             #[cfg(feature = "e2e")]
             if std::env::var_os("CLOUDSTACK_E2E_OPEN_FIRST").is_some() {
-                let first_post = state.borrow().posts.first().map(|post| post.id.clone());
-                if let Some(post_id) = first_post {
+                let requested = std::env::var("CLOUDSTACK_E2E_POST_ID").ok();
+                let post_id =
+                    requested.or_else(|| state.borrow().posts.first().map(|post| post.id.clone()));
+                if let Some(post_id) = post_id {
                     load_document(&widgets, &state, &post_id);
                 }
+            }
+        },
+    );
+}
+
+fn show_content_repair_dialog(
+    widgets: &Widgets,
+    state: &Rc<RefCell<EditorState>>,
+    root: PathBuf,
+    content_dir: &str,
+) {
+    let directory_entry = gtk::Entry::builder()
+        .text(content_dir)
+        .activates_default(true)
+        .build();
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    content.append(
+        &gtk::Label::builder()
+            .label("可以重新创建原目录，也可以输入新的项目内相对目录。")
+            .xalign(0.0)
+            .wrap(true)
+            .build(),
+    );
+    content.append(&directory_entry);
+    let dialog = adw::AlertDialog::builder()
+        .heading("文章目录不存在")
+        .body(format!("配置中的文章目录“{content_dir}”已被移动或删除。"))
+        .extra_child(&content)
+        .default_response("repair")
+        .close_response("cancel")
+        .build();
+    dialog.add_responses(&[("cancel", "取消"), ("repair", "修复并打开")]);
+    dialog.set_response_appearance("repair", adw::ResponseAppearance::Suggested);
+
+    let callback_widgets = widgets.clone();
+    let callback_state = Rc::clone(state);
+    let callback_entry = directory_entry.clone();
+    dialog.connect_response(Some("repair"), move |_, _| {
+        let content_dir = callback_entry.text().trim().to_owned();
+        if content_dir.is_empty() {
+            show_error(&callback_widgets, "文章目录不能为空");
+            return;
+        }
+        repair_and_open_project(
+            &callback_widgets,
+            &callback_state,
+            root.clone(),
+            content_dir,
+        );
+    });
+    dialog.present(Some(&widgets.window));
+    directory_entry.grab_focus();
+    directory_entry.select_region(0, -1);
+}
+
+fn repair_and_open_project(
+    widgets: &Widgets,
+    state: &Rc<RefCell<EditorState>>,
+    root: PathBuf,
+    content_dir: String,
+) {
+    set_busy(widgets, state, true, "正在修复文章目录…");
+    let task_root = root.clone();
+    let widgets = widgets.clone();
+    let state = Rc::clone(state);
+    tasks::run(
+        move || project::repair_content_directory(&task_root, &content_dir),
+        move |result| {
+            set_busy(&widgets, &state, false, "");
+            match result {
+                Ok(_) => {
+                    toast(&widgets, "文章目录已修复");
+                    open_project(&widgets, &state, &root);
+                }
+                Err(error) => show_error(&widgets, &error.to_string()),
+            }
+        },
+    );
+}
+
+fn show_project_initialization_dialog(
+    widgets: &Widgets,
+    state: &Rc<RefCell<EditorState>>,
+    root: PathBuf,
+    suggested_content_dir: &str,
+) {
+    let directory_entry = gtk::Entry::builder()
+        .text(suggested_content_dir)
+        .placeholder_text("notes")
+        .activates_default(true)
+        .build();
+    let blog_fields =
+        gtk::CheckButton::with_label("添加常用博客属性（标题、发布日期、草稿和标签）");
+    let path_label = gtk::Label::builder()
+        .label(format!("项目目录：{}", root.display()))
+        .xalign(0.0)
+        .ellipsize(gtk::pango::EllipsizeMode::Middle)
+        .tooltip_text(root.display().to_string())
+        .css_classes(["dim-label"])
+        .build();
+    let directory_label = gtk::Label::builder()
+        .label("文章目录（相对于项目目录；不存在时会创建）")
+        .xalign(0.0)
+        .build();
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    content.append(&path_label);
+    content.append(&directory_label);
+    content.append(&directory_entry);
+    content.append(&blog_fields);
+
+    let dialog = adw::AlertDialog::builder()
+        .heading("创建 CloudStack 项目？")
+        .body("这个文件夹还没有配置。确认后将创建 .cloudstack.json；不会修改已有文章。")
+        .extra_child(&content)
+        .default_response("create")
+        .close_response("cancel")
+        .build();
+    dialog.add_responses(&[("cancel", "取消"), ("create", "创建并打开")]);
+    dialog.set_response_appearance("create", adw::ResponseAppearance::Suggested);
+
+    let callback_widgets = widgets.clone();
+    let callback_state = Rc::clone(state);
+    let callback_entry = directory_entry.clone();
+    dialog.connect_response(Some("create"), move |_, _| {
+        let content_dir = callback_entry.text().trim().to_owned();
+        if content_dir.is_empty() {
+            show_error(&callback_widgets, "文章目录不能为空");
+            return;
+        }
+        initialize_and_open_project(
+            &callback_widgets,
+            &callback_state,
+            root.clone(),
+            content_dir,
+            blog_fields.is_active(),
+        );
+    });
+    dialog.present(Some(&widgets.window));
+    directory_entry.grab_focus();
+    directory_entry.select_region(0, -1);
+}
+
+fn initialize_and_open_project(
+    widgets: &Widgets,
+    state: &Rc<RefCell<EditorState>>,
+    root: PathBuf,
+    content_dir: String,
+    with_blog_frontmatter: bool,
+) {
+    if state.borrow().busy {
+        return;
+    }
+    set_busy(widgets, state, true, "正在创建项目配置…");
+    let task_root = root.clone();
+    let widgets = widgets.clone();
+    let state = Rc::clone(state);
+    tasks::run(
+        move || {
+            let context =
+                project::initialize_project(&task_root, &content_dir, with_blog_frontmatter)?;
+            git::ensure_local_config_excluded(&context)?;
+            Ok(context)
+        },
+        move |result| {
+            set_busy(&widgets, &state, false, "");
+            match result {
+                Ok(_) => {
+                    toast(&widgets, "CloudStack 项目已创建");
+                    open_project(&widgets, &state, &root);
+                }
+                Err(error) => show_error(&widgets, &error.to_string()),
             }
         },
     );
@@ -779,6 +1009,10 @@ fn display_document(
             .set_document(context, document.id.clone(), epoch, document.body.clone());
     }
     frontmatter::refresh(widgets, state);
+    #[cfg(feature = "e2e")]
+    if std::env::var_os("CLOUDSTACK_E2E_PROPERTIES_OPEN").is_some() {
+        widgets.frontmatter_split.set_show_sidebar(true);
+    }
     epoch
 }
 
@@ -934,9 +1168,6 @@ fn sync_controls(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     widgets
         .properties_button
         .set_sensitive(has_document && !state.busy);
-    widgets
-        .publish_button
-        .set_sensitive(has_project && !state.busy);
     widgets.git_panel.set_project_available(has_project);
     widgets
         .git_panel

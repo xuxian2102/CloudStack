@@ -2,6 +2,8 @@
   "no_project": [],
   "stale_project_session": [],
   "invalid_project": ["detail"],
+  "missing_project_config": [],
+  "missing_content_directory": ["path"],
   "config": ["detail"],
   "invalid_post_id": ["id"],
   "not_found": ["id"],

@@ -1,20 +1,26 @@
 use std::cell::Cell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use cloudstack_core::model::{ChangeKind, GitStatus, PublishResult};
-use cloudstack_core::services::git;
+use cloudstack_core::model::{ChangeKind, GitStatus, PostSummary, ProjectContext, PublishResult};
+use cloudstack_core::services::{git, project};
 
 use super::{
     git_panel, git_panel::operation_log, set_busy, show_error, toast, EditorState, Widgets,
 };
 use crate::tasks;
 
+const MAX_STATUS_CHANGES: usize = 100;
+
 struct PublishDialog {
     dialog: adw::Dialog,
     branch_label: gtk::Label,
     upstream_label: gtk::Label,
     changes_label: gtk::Label,
+    article_choices: Vec<ArticleChoice>,
+    remember_choices: gtk::CheckButton,
     message_entry: gtk::Entry,
     push_check: gtk::CheckButton,
     publish_button: gtk::Button,
@@ -26,8 +32,14 @@ struct PublishDialog {
     working: Cell<bool>,
 }
 
+struct ArticleChoice {
+    article_id: Option<String>,
+    paths: Vec<String>,
+    checkbox: gtk::CheckButton,
+}
+
 impl PublishDialog {
-    fn new(status: &GitStatus) -> Rc<Self> {
+    fn new(context: &ProjectContext, posts: &[PostSummary], status: &GitStatus) -> Rc<Self> {
         let branch_label = detail_label();
         let upstream_label = detail_label();
         let changes_label = detail_label();
@@ -36,7 +48,7 @@ impl PublishDialog {
 
         let status_group = adw::PreferencesGroup::builder()
             .title("仓库状态")
-            .description("只会暂存内容目录与当前项目配置文件；其他改动仅供检查。")
+            .description("只提交下方勾选的文章及其图片；CloudStack 配置和其他文件不会提交。")
             .build();
         let branch_row = adw::ActionRow::builder().title("分支").build();
         branch_row.add_suffix(&branch_label);
@@ -53,6 +65,30 @@ impl PublishDialog {
             .child(&changes_frame)
             .build();
 
+        let article_choices = build_article_choices(context, posts, status);
+        let choices_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        for choice in &article_choices {
+            choices_box.append(&choice.checkbox);
+        }
+        if article_choices.is_empty() {
+            choices_box.append(
+                &gtk::Label::builder()
+                    .label("没有可选择的文章改动")
+                    .xalign(0.0)
+                    .css_classes(["dim-label"])
+                    .build(),
+            );
+        }
+        let choices_group = adw::PreferencesGroup::builder()
+            .title("本次提交")
+            .description("取消勾选可跳过文章；记住选择后，下次仍保持排除。")
+            .build();
+        let choices_row = adw::PreferencesRow::new();
+        choices_row.set_child(Some(&choices_box));
+        choices_group.add(&choices_row);
+        let remember_choices = gtk::CheckButton::with_label("记住文章选择");
+        remember_choices.set_active(true);
+
         let message_entry = gtk::Entry::builder()
             .placeholder_text("提交信息（必填）")
             .activates_default(true)
@@ -67,6 +103,7 @@ impl PublishDialog {
         let form = gtk::Box::new(gtk::Orientation::Vertical, 10);
         form.append(&message_entry);
         form.append(&push_check);
+        form.append(&remember_choices);
         form.append(&result_label);
 
         let trace_buffer = gtk::TextBuffer::new(None);
@@ -99,6 +136,7 @@ impl PublishDialog {
         content.set_margin_end(18);
         content.append(&status_group);
         content.append(&changes_scroll);
+        content.append(&choices_group);
         content.append(&form);
 
         let spinner = gtk::Spinner::new();
@@ -128,6 +166,8 @@ impl PublishDialog {
             branch_label,
             upstream_label,
             changes_label,
+            article_choices,
+            remember_choices,
             message_entry,
             push_check,
             publish_button,
@@ -145,6 +185,14 @@ impl PublishDialog {
                 dialog.sync_publish_button();
             }
         });
+        for choice in &this.article_choices {
+            let weak = Rc::downgrade(&this);
+            choice.checkbox.connect_toggled(move |_| {
+                if let Some(dialog) = weak.upgrade() {
+                    dialog.sync_publish_button();
+                }
+            });
+        }
         this
     }
 
@@ -163,9 +211,12 @@ impl PublishDialog {
         if status.changes.is_empty() {
             self.changes_label.set_label("工作区没有改动");
         } else {
-            let text = status
+            let mut lines = status
                 .changes
                 .iter()
+                .filter(|change| change.managed)
+                .chain(status.changes.iter().filter(|change| !change.managed))
+                .take(MAX_STATUS_CHANGES)
                 .map(|change| {
                     let scope = if change.managed {
                         "受管"
@@ -183,9 +234,14 @@ impl PublishDialog {
                         change_kind_symbol(change.kind)
                     )
                 })
-                .collect::<Vec<_>>()
-                .join("\n");
-            self.changes_label.set_label(&text);
+                .collect::<Vec<_>>();
+            let omitted = status.changes.len().saturating_sub(lines.len());
+            if omitted > 0 {
+                lines.push(format!(
+                    "… 还有 {omitted} 项未展开；请完善 .gitignore 后刷新"
+                ));
+            }
+            self.changes_label.set_label(&lines.join("\n"));
         }
 
         let has_managed = status.changes.iter().any(|change| change.managed);
@@ -213,6 +269,10 @@ impl PublishDialog {
         self.message_entry.set_sensitive(!working);
         self.push_check
             .set_sensitive(!working && self.has_upstream.get());
+        self.remember_choices.set_sensitive(!working);
+        for choice in &self.article_choices {
+            choice.checkbox.set_sensitive(!working);
+        }
         self.spinner.set_visible(working);
         if working {
             self.spinner.start();
@@ -226,13 +286,141 @@ impl PublishDialog {
         self.publish_button.set_sensitive(
             !self.working.get()
                 && self.status_allows_publish.get()
+                && self
+                    .article_choices
+                    .iter()
+                    .any(|choice| choice.checkbox.is_active())
                 && !self.message_entry.text().trim().is_empty(),
         );
     }
+
+    fn selected_paths(&self) -> Vec<String> {
+        self.article_choices
+            .iter()
+            .filter(|choice| choice.checkbox.is_active())
+            .flat_map(|choice| choice.paths.iter().cloned())
+            .collect()
+    }
+
+    fn updated_exclusions(&self, context: &ProjectContext) -> Vec<String> {
+        let mut excluded = context
+            .config
+            .git
+            .excluded_articles
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for choice in &self.article_choices {
+            let Some(article) = &choice.article_id else {
+                continue;
+            };
+            if choice.checkbox.is_active() {
+                excluded.remove(article);
+            } else {
+                excluded.insert(article.clone());
+            }
+        }
+        excluded.into_iter().collect()
+    }
+}
+
+fn build_article_choices(
+    context: &ProjectContext,
+    posts: &[PostSummary],
+    status: &GitStatus,
+) -> Vec<ArticleChoice> {
+    let content_prefix = format!("{}/", context.config.content_dir.trim_end_matches('/'));
+    let mut article_ids = posts
+        .iter()
+        .map(|post| post.id.clone())
+        .collect::<BTreeSet<_>>();
+    for change in status.changes.iter().filter(|change| change.managed) {
+        if let Some(relative) = change.path.strip_prefix(&content_prefix) {
+            let extension = Path::new(relative)
+                .extension()
+                .and_then(|extension| extension.to_str());
+            if extension.is_some_and(|extension| {
+                context
+                    .config
+                    .extensions
+                    .iter()
+                    .any(|allowed| allowed.strip_prefix('.') == Some(extension))
+            }) {
+                article_ids.insert(relative.to_owned());
+            }
+        }
+    }
+
+    let mut groups: BTreeMap<String, (Option<String>, Vec<String>)> = BTreeMap::new();
+    for change in status.changes.iter().filter(|change| change.managed) {
+        let article = article_for_git_path(context, &article_ids, &change.path);
+        let key = article.as_ref().map_or_else(
+            || format!("path:{}", change.path),
+            |id| format!("article:{id}"),
+        );
+        let entry = groups.entry(key).or_insert_with(|| (article, Vec::new()));
+        entry.1.push(change.path.clone());
+        if let Some(old_path) = &change.old_path {
+            if old_path == context.config.content_dir.as_str()
+                || old_path.starts_with(&content_prefix)
+            {
+                entry.1.push(old_path.clone());
+            }
+        }
+    }
+
+    groups
+        .into_values()
+        .map(|(article_id, mut paths)| {
+            paths.sort();
+            paths.dedup();
+            let label = article_id
+                .clone()
+                .unwrap_or_else(|| paths.first().cloned().unwrap_or_default());
+            let active = article_id.as_ref().is_none_or(|article| {
+                !context
+                    .config
+                    .git
+                    .excluded_articles
+                    .iter()
+                    .any(|excluded| excluded == article)
+            });
+            let checkbox = gtk::CheckButton::with_label(&label);
+            checkbox.set_active(active);
+            checkbox.set_tooltip_text(Some(&format!("{} 个受管路径", paths.len())));
+            ArticleChoice {
+                article_id,
+                paths,
+                checkbox,
+            }
+        })
+        .collect()
+}
+
+fn article_for_git_path(
+    context: &ProjectContext,
+    article_ids: &BTreeSet<String>,
+    path: &str,
+) -> Option<String> {
+    let content_prefix = format!("{}/", context.config.content_dir.trim_end_matches('/'));
+    let relative = path.strip_prefix(&content_prefix)?;
+    if article_ids.contains(relative) {
+        return Some(relative.to_owned());
+    }
+    article_ids
+        .iter()
+        .filter(|article| {
+            let asset_prefix = article
+                .rsplit_once('.')
+                .map_or_else(|| format!("{article}/"), |(stem, _)| format!("{stem}/"));
+            relative.starts_with(&asset_prefix)
+        })
+        .max_by_key(|article| article.len())
+        .cloned()
 }
 
 pub(super) fn show_dialog(widgets: &Widgets, state: &Rc<std::cell::RefCell<EditorState>>) {
-    let context = {
+    let (context, posts) = {
         let state = state.borrow();
         if state.busy || state.dirty {
             return;
@@ -240,7 +428,7 @@ pub(super) fn show_dialog(widgets: &Widgets, state: &Rc<std::cell::RefCell<Edito
         let Some(context) = &state.project else {
             return;
         };
-        context.clone()
+        (context.clone(), state.posts.clone())
     };
     set_busy(widgets, state, true, "正在读取 Git 状态…");
     let widgets = widgets.clone();
@@ -253,7 +441,7 @@ pub(super) fn show_dialog(widgets: &Widgets, state: &Rc<std::cell::RefCell<Edito
         move |result| {
             set_busy(&widgets, &state, false, "");
             match result {
-                Ok(status) => present_dialog(&widgets, &state, context, status),
+                Ok(status) => present_dialog(&widgets, &state, context, posts, status),
                 Err(error) => show_error(&widgets, &error.to_string()),
             }
         },
@@ -264,9 +452,10 @@ fn present_dialog(
     widgets: &Widgets,
     state: &Rc<std::cell::RefCell<EditorState>>,
     context: cloudstack_core::ProjectContext,
+    posts: Vec<PostSummary>,
     status: GitStatus,
 ) {
-    let dialog = PublishDialog::new(&status);
+    let dialog = PublishDialog::new(&context, &posts, &status);
     let callback_dialog = Rc::clone(&dialog);
     let callback_widgets = widgets.clone();
     let callback_state = Rc::clone(state);
@@ -276,6 +465,9 @@ fn present_dialog(
             return;
         }
         let push = callback_dialog.push_check.is_active();
+        let selected_paths = callback_dialog.selected_paths();
+        let remember_choices = callback_dialog.remember_choices.is_active();
+        let updated_exclusions = callback_dialog.updated_exclusions(&context);
         callback_dialog.result_label.set_label("正在暂存受管改动…");
         callback_dialog.set_working(true);
         set_busy(
@@ -286,15 +478,37 @@ fn present_dialog(
         );
 
         let task_context = context.clone();
-        let refresh_context = context.clone();
+        let fallback_context = context.clone();
         let task_dialog = Rc::clone(&callback_dialog);
         let task_widgets = callback_widgets.clone();
         let task_state = Rc::clone(&callback_state);
         tasks::run(
-            move || git::publish(&task_context, &message, push),
+            move || {
+                let task_context = if remember_choices {
+                    let mut config = task_context.config.clone();
+                    config.git.excluded_articles = updated_exclusions;
+                    project::write_project_config(&task_context, config)?
+                } else {
+                    task_context
+                };
+                let result = git::publish_selected(&task_context, &message, push, &selected_paths)?;
+                Ok((result, task_context))
+            },
             move |result| {
+                let refresh_context = match &result {
+                    Ok((_, updated_context)) => updated_context.clone(),
+                    Err(_) => fallback_context.clone(),
+                };
                 match result {
-                    Ok(result) => {
+                    Ok((result, updated_context)) => {
+                        let should_replace = task_state
+                            .borrow()
+                            .project
+                            .as_ref()
+                            .is_some_and(|project| project.root == updated_context.root);
+                        if should_replace {
+                            task_state.borrow_mut().project = Some(updated_context);
+                        }
                         task_dialog
                             .result_label
                             .set_label(&publish_summary(&result, push));
@@ -439,5 +653,34 @@ mod tests {
         assert!(log.contains("$ git push"));
         assert!(log.contains("退出: 0"));
         assert!(log.contains("ok"));
+    }
+
+    #[test]
+    fn nested_article_wins_over_an_outer_asset_directory() {
+        let root = std::path::PathBuf::from("/tmp/cloudstack-publish-group-test");
+        let context = ProjectContext {
+            content_root: root.join("src/content/blog"),
+            config_path: root.join(".cloudstack.json"),
+            root,
+            config: Default::default(),
+        };
+        let articles = ["hello.md".to_string(), "hello/nested.md".to_string()]
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            article_for_git_path(&context, &articles, "src/content/blog/hello/nested.md")
+                .as_deref(),
+            Some("hello/nested.md")
+        );
+        assert_eq!(
+            article_for_git_path(
+                &context,
+                &articles,
+                "src/content/blog/hello/nested/photo.png"
+            )
+            .as_deref(),
+            Some("hello/nested.md")
+        );
     }
 }

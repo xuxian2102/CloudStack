@@ -2,23 +2,17 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Component, Path};
+use std::{fs::Permissions, os::unix::fs::PermissionsExt as _};
 
 use crate::error::AppError;
-use crate::model::{ProjectConfig, ProjectContext, CONFIG_VERSION};
+use crate::model::{FieldSpec, ProjectConfig, ProjectContext, CONFIG_VERSION};
 
 pub const CONFIG_FILE: &str = ".cloudstack.json";
 pub const LEGACY_CONFIG_FILE: &str = ".blog-editor.json";
+const CONTENT_DIR_SUGGESTIONS: [&str; 4] = ["src/content/blog", "content", "posts", "notes"];
 
 pub fn open_project(root: &Path) -> Result<ProjectContext, AppError> {
-    let root = root
-        .canonicalize()
-        .map_err(|e| AppError::InvalidProject(format!("{}：{e}", root.display())))?;
-    if !root.is_dir() {
-        return Err(AppError::InvalidProject(format!(
-            "不是目录：{}",
-            root.display()
-        )));
-    }
+    let root = canonical_project_root(root)?;
 
     let config_path = select_config_path(&root)?;
     let config_name = config_path
@@ -34,16 +28,197 @@ pub fn open_project(root: &Path) -> Result<ProjectContext, AppError> {
 fn select_config_path(root: &Path) -> Result<std::path::PathBuf, AppError> {
     let current = root.join(CONFIG_FILE);
     let legacy = root.join(LEGACY_CONFIG_FILE);
-    match (current.is_file(), legacy.is_file()) {
+    match (
+        is_regular_config_file(&current)?,
+        is_regular_config_file(&legacy)?,
+    ) {
         (true, false) => Ok(current),
         (false, true) => Ok(legacy),
         (true, true) => Err(AppError::Config(format!(
             "项目同时包含 {CONFIG_FILE} 和 {LEGACY_CONFIG_FILE}，请只保留其中一个"
         ))),
-        (false, false) => Err(AppError::Config(format!(
-            "项目根目录缺少 {CONFIG_FILE}（也未找到兼容配置 {LEGACY_CONFIG_FILE}）"
-        ))),
+        (false, false) => Err(AppError::MissingProjectConfig),
     }
+}
+
+fn is_regular_config_file(path: &Path) -> Result<bool, AppError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(AppError::Config(format!(
+            "配置路径必须是普通文件：{}",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(AppError::Io(error.to_string())),
+    }
+}
+
+/// 为首次打开的普通文件夹选择一个不会改变已有目录结构的文章目录。
+/// 已有常见目录优先；全都不存在时仅返回建议值，真正创建仍需用户确认。
+pub fn suggest_content_dir(root: &Path) -> Result<String, AppError> {
+    let root = canonical_project_root(root)?;
+    for candidate in CONTENT_DIR_SUGGESTIONS {
+        let path = root.join(candidate);
+        if path.is_dir()
+            && path
+                .canonicalize()
+                .is_ok_and(|canonical| canonical.starts_with(&root))
+        {
+            return Ok(candidate.to_string());
+        }
+    }
+    Ok("notes".to_string())
+}
+
+/// 在用户确认后创建最小配置和文章目录。不会覆盖新旧任一配置文件。
+pub fn initialize_project(
+    root: &Path,
+    content_dir: &str,
+    with_blog_frontmatter: bool,
+) -> Result<ProjectContext, AppError> {
+    let root = canonical_project_root(root)?;
+    match select_config_path(&root) {
+        Err(AppError::MissingProjectConfig) => {}
+        Ok(path) => {
+            return Err(AppError::Config(format!(
+                "项目已经存在配置：{}",
+                path.display()
+            )));
+        }
+        Err(error) => return Err(error),
+    }
+
+    ensure_content_directory(&root, content_dir)?;
+
+    let mut config = ProjectConfig {
+        content_dir: content_dir.to_owned(),
+        ..ProjectConfig::default()
+    };
+    if with_blog_frontmatter {
+        config.frontmatter.fields = vec![
+            FieldSpec {
+                name: "title".into(),
+                field_type: "string".into(),
+                required: true,
+                default: None,
+            },
+            FieldSpec {
+                name: "pubDate".into(),
+                field_type: "date".into(),
+                required: true,
+                default: None,
+            },
+            FieldSpec {
+                name: "draft".into(),
+                field_type: "boolean".into(),
+                required: false,
+                default: Some(serde_json::json!(false)),
+            },
+            FieldSpec {
+                name: "tags".into(),
+                field_type: "tags".into(),
+                required: false,
+                default: Some(serde_json::json!([])),
+            },
+        ];
+    }
+
+    // 先用最终内容目录验证完整配置，再以 noclobber 原子写入，防止竞态覆盖。
+    let _ = validate_project_config_at(&root, config.clone(), root.join(CONFIG_FILE))?;
+    let mut bytes = serde_json::to_vec_pretty(&config)
+        .map_err(|error| AppError::Config(format!("配置序列化失败：{error}")))?;
+    bytes.push(b'\n');
+    let mut temporary = tempfile::NamedTempFile::new_in(&root)?;
+    temporary
+        .as_file()
+        .set_permissions(Permissions::from_mode(0o644))?;
+    temporary.write_all(&bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist_noclobber(root.join(CONFIG_FILE))
+        .map_err(|error| AppError::Io(format!("创建 {CONFIG_FILE} 失败：{error}")))?;
+    fs::File::open(&root)?.sync_all()?;
+    open_project(&root)
+}
+
+/// 修复被移动或删除的文章目录；保留配置中的未知字段，只更新 contentDir。
+pub fn repair_content_directory(
+    root: &Path,
+    content_dir: &str,
+) -> Result<ProjectContext, AppError> {
+    let root = canonical_project_root(root)?;
+    let config_path = select_config_path(&root)?;
+    let raw = fs::read_to_string(&config_path)?;
+    let mut config: ProjectConfig = serde_json::from_str(&raw)
+        .map_err(|error| AppError::Config(format!("配置解析失败：{error}")))?;
+    let content_root = ensure_content_directory(&root, content_dir)?;
+    let context = ProjectContext {
+        root,
+        content_root,
+        config_path,
+        config: config.clone(),
+    };
+    config.content_dir = content_dir.to_owned();
+    write_project_config(&context, config)
+}
+
+fn ensure_content_directory(
+    root: &Path,
+    content_dir: &str,
+) -> Result<std::path::PathBuf, AppError> {
+    let content_path = checked_content_path(root, content_dir)?;
+    if content_path.exists() {
+        let canonical = content_path.canonicalize()?;
+        if !canonical.is_dir() || !canonical.starts_with(root) {
+            return Err(AppError::Config(format!("文章目录无效：{content_dir}")));
+        }
+        return Ok(canonical);
+    }
+
+    let mut ancestor = content_path.as_path();
+    while !ancestor.exists() {
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| AppError::Config(format!("无法确认文章目录：{content_dir}")))?;
+    }
+    let canonical_ancestor = ancestor.canonicalize()?;
+    if !canonical_ancestor.starts_with(root) {
+        return Err(AppError::Config(format!(
+            "文章目录不能经过项目外的符号链接：{content_dir}"
+        )));
+    }
+    fs::create_dir_all(&content_path)?;
+    let canonical = content_path.canonicalize()?;
+    if !canonical.starts_with(root) {
+        return Err(AppError::Config(format!("文章目录无效：{content_dir}")));
+    }
+    Ok(canonical)
+}
+
+fn canonical_project_root(root: &Path) -> Result<std::path::PathBuf, AppError> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| AppError::InvalidProject(format!("{}：{error}", root.display())))?;
+    if !root.is_dir() {
+        return Err(AppError::InvalidProject(format!(
+            "不是目录：{}",
+            root.display()
+        )));
+    }
+    Ok(root)
+}
+
+fn checked_content_path(root: &Path, content_dir: &str) -> Result<std::path::PathBuf, AppError> {
+    let content_rel = Path::new(content_dir);
+    if content_dir.is_empty()
+        || content_rel.is_absolute()
+        || !content_rel
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(AppError::Config(format!("contentDir 非法：{content_dir}")));
+    }
+    Ok(root.join(content_rel))
 }
 
 /// 打开项目与设置保存必须共用同一套校验，避免 UI 能写出下一次启动却打不开的配置。
@@ -70,21 +245,18 @@ fn validate_project_config_at(
     }
 
     // contentDir 必须是项目内的相对路径，规则与 PostId 同样严格
-    let content_rel = Path::new(&config.content_dir);
-    if content_rel.is_absolute()
-        || !content_rel
-            .components()
-            .all(|c| matches!(c, Component::Normal(_)))
-    {
-        return Err(AppError::Config(format!(
-            "contentDir 非法：{}",
-            config.content_dir
-        )));
-    }
-    let content_root = root
-        .join(content_rel)
+    let content_root = checked_content_path(root, &config.content_dir)?
         .canonicalize()
-        .map_err(|_| AppError::Config(format!("contentDir 不存在：{}", config.content_dir)))?;
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                AppError::MissingContentDirectory(config.content_dir.clone())
+            } else {
+                AppError::Config(format!(
+                    "无法读取 contentDir {}：{error}",
+                    config.content_dir
+                ))
+            }
+        })?;
     if !content_root.is_dir() || !content_root.starts_with(root) {
         return Err(AppError::Config(format!(
             "contentDir 非法：{}",
@@ -94,6 +266,7 @@ fn validate_project_config_at(
 
     validate_extensions(&config.extensions)?;
     validate_frontmatter_fields(&config)?;
+    validate_git_preferences(&config)?;
 
     Ok(ProjectContext {
         root: root.to_path_buf(),
@@ -214,6 +387,33 @@ fn validate_frontmatter_fields(config: &ProjectConfig) -> Result<(), AppError> {
     Ok(())
 }
 
+fn validate_git_preferences(config: &ProjectConfig) -> Result<(), AppError> {
+    let mut seen = HashSet::new();
+    for article in &config.git.excluded_articles {
+        let path = Path::new(article);
+        let extension = path.extension().and_then(|value| value.to_str());
+        let valid_extension = extension.is_some_and(|extension| {
+            config
+                .extensions
+                .iter()
+                .any(|allowed| allowed.strip_prefix('.') == Some(extension))
+        });
+        if article.is_empty()
+            || path.is_absolute()
+            || !path
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+            || !valid_extension
+            || !seen.insert(article)
+        {
+            return Err(AppError::Config(format!(
+                "Git 排除文章标识非法或重复：{article}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn merge_json(existing: &mut serde_json::Value, updated: serde_json::Value) {
     match (existing, updated) {
         (serde_json::Value::Object(existing), serde_json::Value::Object(updated)) => {
@@ -298,7 +498,10 @@ mod tests {
     #[test]
     fn rejects_missing_config_wrong_version_and_bad_content_dir() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(matches!(open_project(dir.path()), Err(AppError::Config(_))));
+        assert!(matches!(
+            open_project(dir.path()),
+            Err(AppError::MissingProjectConfig)
+        ));
 
         let dir = setup(r#"{ "version": 99 }"#);
         assert!(matches!(open_project(dir.path()), Err(AppError::Config(_))));
@@ -310,7 +513,102 @@ mod tests {
         assert!(matches!(open_project(dir.path()), Err(AppError::Config(_))));
 
         let dir = setup(r#"{ "version": 1, "contentDir": "does/not/exist" }"#);
+        assert!(matches!(
+            open_project(dir.path()),
+            Err(AppError::MissingContentDirectory(path)) if path == "does/not/exist"
+        ));
+    }
+
+    #[test]
+    fn suggests_an_existing_common_content_directory_or_notes() {
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(suggest_content_dir(empty.path()).unwrap(), "notes");
+
+        let astro = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(astro.path().join("src/content/blog")).unwrap();
+        std::fs::create_dir_all(astro.path().join("notes")).unwrap();
+        assert_eq!(
+            suggest_content_dir(astro.path()).unwrap(),
+            "src/content/blog"
+        );
+    }
+
+    #[test]
+    fn initializes_a_minimal_project_without_overwriting_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = initialize_project(dir.path(), "notes", false).unwrap();
+        assert!(context.content_root.ends_with("notes"));
+        assert!(context.config.frontmatter.fields.is_empty());
+        assert!(dir.path().join(CONFIG_FILE).is_file());
+
+        let before = fs::read_to_string(dir.path().join(CONFIG_FILE)).unwrap();
+        assert!(initialize_project(dir.path(), "other", false).is_err());
+        assert_eq!(
+            fs::read_to_string(dir.path().join(CONFIG_FILE)).unwrap(),
+            before
+        );
+        assert!(!dir.path().join("other").exists());
+    }
+
+    #[test]
+    fn blog_template_adds_the_optional_frontmatter_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = initialize_project(dir.path(), "content", true).unwrap();
+        let names = context
+            .config
+            .frontmatter
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["title", "pubDate", "draft", "tags"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn initialization_rejects_a_content_directory_symlink_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("notes")).unwrap();
+
+        assert!(initialize_project(dir.path(), "notes", false).is_err());
+        assert!(!dir.path().join(CONFIG_FILE).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opening_and_initialization_reject_config_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        fs::write(outside.path(), r#"{ "version": 1 }"#).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join(CONFIG_FILE)).unwrap();
+
         assert!(matches!(open_project(dir.path()), Err(AppError::Config(_))));
+        assert!(initialize_project(dir.path(), "notes", false).is_err());
+        assert!(!dir.path().join("notes").exists());
+    }
+
+    #[test]
+    fn repairs_a_missing_content_directory_and_preserves_unknown_config() {
+        let dir = setup(
+            r#"{
+              "version": 1,
+              "customTool": { "keep": true }
+            }"#,
+        );
+        fs::remove_dir_all(dir.path().join("src/content/blog")).unwrap();
+        assert!(matches!(
+            open_project(dir.path()),
+            Err(AppError::MissingContentDirectory(path)) if path == "src/content/blog"
+        ));
+
+        let context = repair_content_directory(dir.path(), "notes").unwrap();
+        assert!(context.content_root.ends_with("notes"));
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.path().join(CONFIG_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(value["contentDir"], "notes");
+        assert_eq!(value["customTool"]["keep"], true);
     }
 
     #[test]

@@ -12,6 +12,8 @@ use gtk::glib;
 use super::{open_project, set_busy, show_error, toast, EditorState, Widgets};
 use crate::tasks;
 
+const MAX_DISPLAYED_CHANGES: usize = 100;
+
 #[derive(Clone)]
 pub(super) struct GitPanel {
     root: gtk::Box,
@@ -26,6 +28,7 @@ pub(super) struct GitPanel {
     changes_list: gtk::Box,
     refresh_button: gtk::Button,
     fetch_button: gtk::Button,
+    untrack_config_button: gtk::Button,
     publish_button: gtk::Button,
     split: Rc<RefCell<Option<gtk::Paned>>>,
     expanded: Rc<Cell<bool>>,
@@ -105,7 +108,14 @@ impl GitPanel {
             .action_name("win.fetch-git")
             .sensitive(false)
             .build();
+        let untrack_config_button = gtk::Button::builder()
+            .label("停止跟踪配置")
+            .tooltip_text("从 Git 索引移除配置，但保留本地文件")
+            .action_name("win.untrack-config")
+            .visible(false)
+            .build();
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        actions.append(&untrack_config_button);
         actions.append(&fetch_button);
         actions.append(&refresh_button);
 
@@ -152,6 +162,7 @@ impl GitPanel {
             changes_list,
             refresh_button,
             fetch_button,
+            untrack_config_button,
             publish_button,
             split: Rc::new(RefCell::new(None)),
             expanded: Rc::new(Cell::new(false)),
@@ -186,6 +197,15 @@ impl GitPanel {
                 if height >= 180 {
                     expanded_height.set(height);
                 }
+            }
+        });
+
+        // Hiding the details changes max-position during a later layout pass. Keep
+        // a collapsed panel pinned to the new maximum so no empty lower pane remains.
+        let expanded = Rc::clone(&self.expanded);
+        split.connect_max_position_notify(move |split| {
+            if !expanded.get() && split.position() != split.max_position() {
+                split.set_position(split.max_position());
             }
         });
     }
@@ -229,6 +249,7 @@ impl GitPanel {
         set_changes_placeholder(&self.changes_list, "读取中…");
         self.refresh_button.set_sensitive(false);
         self.fetch_button.set_sensitive(false);
+        self.untrack_config_button.set_sensitive(false);
         self.publish_button.set_label("读取中");
         self.publish_button.set_sensitive(false);
     }
@@ -243,6 +264,7 @@ impl GitPanel {
             set_changes_placeholder(&self.changes_list, "不可用");
             self.refresh_button.set_sensitive(false);
             self.fetch_button.set_sensitive(false);
+            self.untrack_config_button.set_visible(false);
             self.publish_button.set_label("提交");
             self.publish_button.set_sensitive(false);
             return;
@@ -266,6 +288,10 @@ impl GitPanel {
             .set_sensitive(snapshot.environment.git_available);
         self.fetch_button
             .set_sensitive(!snapshot.remotes.is_empty());
+        self.untrack_config_button
+            .set_visible(snapshot.config_tracked);
+        self.untrack_config_button
+            .set_sensitive(snapshot.config_tracked);
         let action = recommended_action(snapshot);
         self.publish_button.set_label(compact_action_label(action));
         self.publish_button
@@ -283,6 +309,7 @@ impl GitPanel {
         set_changes_placeholder(&self.changes_list, "未知");
         self.refresh_button.set_sensitive(true);
         self.fetch_button.set_sensitive(false);
+        self.untrack_config_button.set_visible(false);
         self.publish_button.set_sensitive(false);
     }
 
@@ -297,6 +324,7 @@ impl GitPanel {
             self.changes_title.set_label("改动");
             set_changes_placeholder(&self.changes_list, "没有改动");
             self.fetch_button.set_sensitive(false);
+            self.untrack_config_button.set_visible(false);
             self.publish_button.set_sensitive(false);
         }
     }
@@ -313,6 +341,18 @@ impl GitPanel {
             self.publish_button.set_sensitive(available);
         }
     }
+}
+
+pub(super) fn untrack_config(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
+    confirm_operation(
+        widgets,
+        state,
+        "停止跟踪 CloudStack 配置？",
+        "本地配置会从 Git 索引移除，并单独创建一个本地提交；文件本身会保留并加入此仓库的本地 exclude，不会自动推送。",
+        "停止跟踪",
+        Completion::Refresh,
+        |context| git::stop_tracking_project_config(&context),
+    );
 }
 
 fn git_split_position(minimum: i32, maximum: i32, expanded: bool, desired_height: i32) -> i32 {
@@ -467,7 +507,8 @@ fn populate_changes(list: &gtk::Box, snapshot: &RepositorySnapshot) {
         list.append(&status_label("没有改动"));
         return;
     }
-    for change in &snapshot.status.changes {
+    let displayed = prioritized_changes(&snapshot.status.changes);
+    for change in &displayed {
         let state = gtk::Label::builder()
             .label(change_marker(change.kind))
             .width_chars(1)
@@ -492,6 +533,25 @@ fn populate_changes(list: &gtk::Box, snapshot: &RepositorySnapshot) {
         row.append(&path);
         list.append(&row);
     }
+    let omitted = snapshot
+        .status
+        .changes
+        .len()
+        .saturating_sub(displayed.len());
+    if omitted > 0 {
+        list.append(&status_label(&format!(
+            "还有 {omitted} 项未展开；请完善 .gitignore 后刷新"
+        )));
+    }
+}
+
+fn prioritized_changes(changes: &[FileChange]) -> Vec<&FileChange> {
+    changes
+        .iter()
+        .filter(|change| change.managed)
+        .chain(changes.iter().filter(|change| !change.managed))
+        .take(MAX_DISPLAYED_CHANGES)
+        .collect()
 }
 
 fn set_changes_placeholder(list: &gtk::Box, text: &str) {
@@ -578,7 +638,7 @@ pub(super) fn activate_primary(widgets: &Widgets, state: &Rc<RefCell<EditorState
         return;
     }
     if state.borrow().dirty {
-        if gtk::prelude::WidgetExt::activate_action(&widgets.window, "publish", None).is_err() {
+        if gtk::prelude::WidgetExt::activate_action(&widgets.window, "win.publish", None).is_err() {
             show_error(widgets, "无法保存并打开提交窗口");
         }
         return;
@@ -600,7 +660,9 @@ pub(super) fn activate_primary(widgets: &Widgets, state: &Rc<RefCell<EditorState
         ),
         PrimaryAction::ConfigureIdentity => show_identity_dialog(widgets, state),
         PrimaryAction::Commit => {
-            if gtk::prelude::WidgetExt::activate_action(&widgets.window, "publish", None).is_err() {
+            if gtk::prelude::WidgetExt::activate_action(&widgets.window, "win.publish", None)
+                .is_err()
+            {
                 show_error(widgets, "无法打开提交窗口");
             }
         }
@@ -1152,6 +1214,7 @@ mod tests {
                 name: "origin".into(),
                 url: Some("https://github.com/example/cloudstack.git".into()),
             }],
+            config_tracked: false,
             status: GitStatus {
                 branch: Some("main".into()),
                 upstream: Some("origin/main".into()),
@@ -1214,6 +1277,30 @@ mod tests {
         assert!(details.contains("M  content/one.md"));
         assert!(details.contains("A  content/two.md · 已暂存"));
         assert!(details.contains("?  .env · 非受管"));
+    }
+
+    #[test]
+    fn displayed_changes_are_bounded_and_keep_managed_articles_first() {
+        let mut changes = (0..150)
+            .map(|index| FileChange {
+                path: format!("node_modules/file-{index}"),
+                old_path: None,
+                kind: ChangeKind::Untracked,
+                staged: false,
+                managed: false,
+            })
+            .collect::<Vec<_>>();
+        changes.push(FileChange {
+            path: "src/content/blog/article.md".into(),
+            old_path: None,
+            kind: ChangeKind::Modified,
+            staged: false,
+            managed: true,
+        });
+
+        let displayed = prioritized_changes(&changes);
+        assert_eq!(displayed.len(), MAX_DISPLAYED_CHANGES);
+        assert_eq!(displayed[0].path, "src/content/blog/article.md");
     }
 
     #[test]

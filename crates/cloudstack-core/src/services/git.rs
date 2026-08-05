@@ -1,3 +1,5 @@
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -271,11 +273,7 @@ pub fn status(ctx: &ProjectContext) -> Result<GitStatus, AppError> {
         return Err(map_git_error(&output));
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_porcelain_v2_with_config(
-        &text,
-        &ctx.config.content_dir,
-        active_config_name(ctx),
-    ))
+    Ok(parse_porcelain_v2(&text, &ctx.config.content_dir))
 }
 
 fn repository_root(root: &Path) -> Result<Option<PathBuf>, AppError> {
@@ -321,6 +319,7 @@ fn empty_snapshot(topology: RepositoryTopology, environment: GitEnvironment) -> 
         sync: SyncRelation::Unknown,
         worktree: WorktreeState::default(),
         remotes: Vec::new(),
+        config_tracked: false,
         status: GitStatus {
             branch: None,
             upstream: None,
@@ -362,6 +361,12 @@ pub fn snapshot(ctx: &ProjectContext) -> Result<RepositorySnapshot, AppError> {
     let has_head = run_git(&ctx.root, &["rev-parse", "--verify", "HEAD"])?
         .status
         .success();
+    let config_tracked = run_git(
+        &ctx.root,
+        &["ls-files", "--error-unmatch", "--", active_config_name(ctx)],
+    )?
+    .status
+    .success();
     let remotes = run_git(&ctx.root, &["remote"])?;
     if !remotes.status.success() {
         return Err(map_git_error(&remotes));
@@ -434,6 +439,7 @@ pub fn snapshot(ctx: &ProjectContext) -> Result<RepositorySnapshot, AppError> {
         sync,
         worktree,
         remotes,
+        config_tracked,
         status,
     })
 }
@@ -460,9 +466,9 @@ fn active_config_name(ctx: &ProjectContext) -> &str {
         .unwrap_or(crate::services::project::CONFIG_FILE)
 }
 
-fn is_managed(path: &str, content_dir: &str, config_file: &str) -> bool {
+fn is_managed(path: &str, content_dir: &str) -> bool {
     let content_dir = content_dir.trim_end_matches('/');
-    path == config_file || path == content_dir || path.starts_with(&format!("{content_dir}/"))
+    path == content_dir || path.starts_with(&format!("{content_dir}/"))
 }
 
 /// 首次提交和日常发布共用的受管路径白名单。
@@ -474,13 +480,47 @@ pub struct ManagedScope {
 
 impl ManagedScope {
     pub fn from_status(ctx: &ProjectContext, status: &GitStatus) -> Self {
+        let mut scope = Self::all_from_status(ctx, status);
+        scope.paths.retain(|path| {
+            owning_article(ctx, status, path).is_none_or(|article| {
+                !ctx.config
+                    .git
+                    .excluded_articles
+                    .iter()
+                    .any(|excluded| excluded == &article)
+            })
+        });
+        scope
+    }
+
+    pub fn from_selected(
+        ctx: &ProjectContext,
+        status: &GitStatus,
+        selected_paths: &[String],
+    ) -> Result<Self, AppError> {
+        let available = Self::all_from_status(ctx, status);
+        let mut paths = selected_paths.to_vec();
+        paths.sort();
+        paths.dedup();
+        if paths
+            .iter()
+            .any(|path| !available.paths.iter().any(|available| available == path))
+        {
+            return Err(AppError::Git(
+                "提交选择包含当前受管改动之外的路径，已拒绝继续".into(),
+            ));
+        }
+        Ok(Self { paths })
+    }
+
+    fn all_from_status(ctx: &ProjectContext, status: &GitStatus) -> Self {
         let mut paths = Vec::new();
         for change in &status.changes {
             if change.managed {
                 paths.push(change.path.clone());
             }
             if let Some(old) = &change.old_path {
-                if is_managed(old, &ctx.config.content_dir, active_config_name(ctx)) {
+                if is_managed(old, &ctx.config.content_dir) {
                     paths.push(old.clone());
                 }
             }
@@ -499,6 +539,43 @@ impl ManagedScope {
     }
 }
 
+fn owning_article(ctx: &ProjectContext, status: &GitStatus, git_path: &str) -> Option<String> {
+    let content_prefix = format!("{}/", ctx.config.content_dir.trim_end_matches('/'));
+    let relative = git_path.strip_prefix(&content_prefix)?;
+    if has_article_extension(ctx, relative) {
+        return Some(relative.to_owned());
+    }
+
+    // 图片目录和嵌套文章目录可以重叠（hello.md 与 hello/nested.md）。从图片父目录
+    // 向上寻找，最深层真实/待删除文章拥有该图片，避免外层排除项吞掉嵌套文章。
+    let mut stem = Path::new(relative).parent()?;
+    loop {
+        for extension in &ctx.config.extensions {
+            let candidate = format!("{}{}", stem.to_string_lossy(), extension);
+            let appears_in_status = status.changes.iter().any(|change| {
+                change.path == format!("{content_prefix}{candidate}")
+                    || change.old_path.as_deref() == Some(&format!("{content_prefix}{candidate}"))
+            });
+            if appears_in_status || ctx.content_root.join(&candidate).is_file() {
+                return Some(candidate);
+            }
+        }
+        stem = stem.parent()?;
+    }
+}
+
+fn has_article_extension(ctx: &ProjectContext, relative: &str) -> bool {
+    Path::new(relative)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ctx.config
+                .extensions
+                .iter()
+                .any(|allowed| allowed.strip_prefix('.') == Some(extension))
+        })
+}
+
 fn classify(xy: &str) -> ChangeKind {
     let mut chars = xy.chars();
     let x = chars.next().unwrap_or('.');
@@ -512,16 +589,10 @@ fn classify(xy: &str) -> ChangeKind {
     }
 }
 
-fn build_change(
-    xy: &str,
-    path: String,
-    old_path: Option<String>,
-    content_dir: &str,
-    config_file: &str,
-) -> FileChange {
+fn build_change(xy: &str, path: String, old_path: Option<String>, content_dir: &str) -> FileChange {
     let staged = xy.chars().next().is_some_and(|x| x != '.');
     let kind = classify(xy);
-    let managed = is_managed(&path, content_dir, config_file);
+    let managed = is_managed(&path, content_dir);
     FileChange {
         path,
         old_path,
@@ -557,10 +628,6 @@ fn parse_rename_fields(rest: &str) -> Option<(&str, &str)> {
 /// 用 -z 而不是默认的换行分隔，是因为文章标题常含中文/特殊字符，
 /// 非 -z 模式下 git 会对路径做 C 风格转义，徒增解析负担。
 pub fn parse_porcelain_v2(text: &str, content_dir: &str) -> GitStatus {
-    parse_porcelain_v2_with_config(text, content_dir, crate::services::project::CONFIG_FILE)
-}
-
-fn parse_porcelain_v2_with_config(text: &str, content_dir: &str, config_file: &str) -> GitStatus {
     let mut branch = None;
     let mut upstream = None;
     let mut ahead = 0u32;
@@ -588,13 +655,7 @@ fn parse_porcelain_v2_with_config(text: &str, content_dir: &str, config_file: &s
             // 其他 header（如 branch.oid），忽略
         } else if let Some(rest) = tok.strip_prefix("1 ") {
             if let Some((xy, path)) = parse_ordinary_fields(rest) {
-                changes.push(build_change(
-                    xy,
-                    path.to_string(),
-                    None,
-                    content_dir,
-                    config_file,
-                ));
+                changes.push(build_change(xy, path.to_string(), None, content_dir));
             }
         } else if let Some(rest) = tok.strip_prefix("2 ") {
             if let Some((xy, path)) = parse_rename_fields(rest) {
@@ -604,7 +665,6 @@ fn parse_porcelain_v2_with_config(text: &str, content_dir: &str, config_file: &s
                     path.to_string(),
                     Some(old_path),
                     content_dir,
-                    config_file,
                 ));
             }
         } else if let Some(rest) = tok.strip_prefix("u ") {
@@ -614,7 +674,7 @@ fn parse_porcelain_v2_with_config(text: &str, content_dir: &str, config_file: &s
                     old_path: None,
                     kind: ChangeKind::Unmerged,
                     staged: false,
-                    managed: is_managed(path, content_dir, config_file),
+                    managed: is_managed(path, content_dir),
                 });
             }
         } else if let Some(path) = tok.strip_prefix("? ") {
@@ -623,7 +683,7 @@ fn parse_porcelain_v2_with_config(text: &str, content_dir: &str, config_file: &s
                 old_path: None,
                 kind: ChangeKind::Untracked,
                 staged: false,
-                managed: is_managed(path, content_dir, config_file),
+                managed: is_managed(path, content_dir),
             });
         }
         // "!" ignored 条目：没有传 --ignored，不会出现
@@ -779,7 +839,110 @@ pub fn initialize(ctx: &ProjectContext) -> Result<GitOperationResult, AppError> 
         None => {}
     }
     let output = run_git(&ctx.root, &["init", "-b", "main"])?;
-    Ok(finish_operation(output, "Git 初始化失败"))
+    let mut result = finish_operation(output, "Git 初始化失败");
+    if result.succeeded() {
+        if let Err(error) = ensure_local_config_excluded(ctx) {
+            result.error = Some(format!("Git 已初始化，但无法设置本地配置排除：{error}"));
+        }
+    }
+    Ok(result)
+}
+
+/// 把 CloudStack 配置加入当前仓库的本地 exclude，不修改共享 `.gitignore`。
+pub fn ensure_local_config_excluded(ctx: &ProjectContext) -> Result<(), AppError> {
+    match repository_root(&ctx.root)? {
+        Some(root) if root == ctx.root => {}
+        Some(_) => return Ok(()),
+        None => return Ok(()),
+    }
+    let output = run_git(&ctx.root, &["rev-parse", "--git-path", "info/exclude"])?;
+    if !output.status.success() {
+        return Err(map_git_error(&output));
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let path = PathBuf::from(raw);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        ctx.root.join(path)
+    };
+    let existing = match fs::read_to_string(&path) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let mut missing = [
+        crate::services::project::CONFIG_FILE,
+        crate::services::project::LEGACY_CONFIG_FILE,
+    ]
+    .into_iter()
+    .filter(|entry| !existing.lines().any(|line| line.trim() == *entry))
+    .peekable();
+    if missing.peek().is_none() {
+        return Ok(());
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        writeln!(file)?;
+    }
+    for entry in missing {
+        writeln!(file, "{entry}")?;
+    }
+    file.sync_all()?;
+    Ok(())
+}
+
+pub fn stop_tracking_project_config(ctx: &ProjectContext) -> Result<GitOperationResult, AppError> {
+    ensure_exact_repository(ctx)?;
+    if git_identity(&ctx.root)?.is_none() {
+        return Err(AppError::Git(
+            "停止跟踪配置需要创建一个本地提交，请先配置仓库提交身份".into(),
+        ));
+    }
+    let staged = run_git(&ctx.root, &["diff", "--cached", "--name-only"])?;
+    if !staged.status.success() {
+        return Err(map_git_error(&staged));
+    }
+    let staged_paths = String::from_utf8_lossy(&staged.stdout);
+    if staged_paths.lines().any(|path| !path.trim().is_empty()) {
+        return Err(AppError::Git(
+            "索引中已有其他暂存改动；为避免把它们带入配置移除提交，请先在终端处理".into(),
+        ));
+    }
+    let output = run_git(
+        &ctx.root,
+        &[
+            "rm",
+            "--cached",
+            "--ignore-unmatch",
+            "--",
+            active_config_name(ctx),
+        ],
+    )?;
+    let mut result = finish_operation(output, "停止跟踪 CloudStack 配置失败");
+    if !result.succeeded() {
+        return Ok(result);
+    }
+    let commit = run_git(&ctx.root, &["commit", "-m", "停止跟踪 CloudStack 本地配置"])?;
+    let commit = finish_operation(commit, "提交配置移除失败");
+    result.report.traces.extend(commit.report.traces);
+    result.error = commit.error;
+    if result.error.is_some() {
+        let restore = run_git(&ctx.root, &["reset", "--", active_config_name(ctx)])?;
+        let restore = finish_operation(restore, "恢复配置索引失败");
+        result.report.traces.extend(restore.report.traces);
+        if let Some(error) = restore.error {
+            let commit_error = result.error.take().unwrap_or_default();
+            result.error = Some(format!("{commit_error}\n恢复配置索引也失败：{error}"));
+        }
+        return Ok(result);
+    }
+    if result.succeeded() {
+        if let Err(error) = ensure_local_config_excluded(ctx) {
+            result.error = Some(format!("配置已停止跟踪，但设置本地排除失败：{error}"));
+        }
+    }
+    Ok(result)
 }
 
 pub fn configure_identity(
@@ -944,6 +1107,24 @@ pub fn pull_fast_forward(ctx: &ProjectContext) -> Result<GitOperationResult, App
 /// 依次 stage → commit → (push)，任何一步失败都停在那一步，
 /// 已经完成的部分如实保留在结果里（不因为后面失败而抹掉前面的成功）。
 pub fn publish(ctx: &ProjectContext, message: &str, push: bool) -> Result<PublishResult, AppError> {
+    publish_internal(ctx, message, push, None)
+}
+
+pub fn publish_selected(
+    ctx: &ProjectContext,
+    message: &str,
+    push: bool,
+    selected_paths: &[String],
+) -> Result<PublishResult, AppError> {
+    publish_internal(ctx, message, push, Some(selected_paths))
+}
+
+fn publish_internal(
+    ctx: &ProjectContext,
+    message: &str,
+    push: bool,
+    selected_paths: Option<&[String]>,
+) -> Result<PublishResult, AppError> {
     let current = status(ctx)?;
     let mut report = OperationReport::default();
 
@@ -978,7 +1159,10 @@ pub fn publish(ctx: &ProjectContext, message: &str, push: bool) -> Result<Publis
         });
     }
 
-    let managed_scope = ManagedScope::from_status(ctx, &current);
+    let managed_scope = match selected_paths {
+        Some(paths) => ManagedScope::from_selected(ctx, &current, paths)?,
+        None => ManagedScope::from_status(ctx, &current),
+    };
     let managed_paths = managed_scope.paths().to_vec();
 
     if managed_scope.is_empty() {
@@ -1134,27 +1318,23 @@ mod tests {
         assert_eq!(untracked.kind, ChangeKind::Untracked);
         assert!(untracked.managed);
 
-        assert!(by_path(".cloudstack.json").managed);
+        assert!(!by_path(".cloudstack.json").managed);
 
         let readme = by_path("README.md");
         assert!(!readme.managed);
     }
 
     #[test]
-    fn manages_only_the_projects_active_legacy_config() {
+    fn treats_all_cloudstack_config_files_as_local_only() {
         let text = porcelain(&[
             "? .cloudstack.json",
             "1 .M N... 100644 100644 100644 h1 h2 .blog-editor.json",
         ]);
-        let status = parse_porcelain_v2_with_config(
-            &text,
-            "src/content/blog",
-            crate::services::project::LEGACY_CONFIG_FILE,
-        );
+        let status = parse_porcelain_v2(&text, "src/content/blog");
         let by_path = |path: &str| status.changes.iter().find(|c| c.path == path).unwrap();
 
         assert!(!by_path(".cloudstack.json").managed);
-        assert!(by_path(".blog-editor.json").managed);
+        assert!(!by_path(".blog-editor.json").managed);
     }
 
     #[test]
@@ -1233,6 +1413,68 @@ mod tests {
         assert!(validate_github_repository_name("owner/repo/extra").is_err());
         assert!(validate_github_repository_name("-danger").is_err());
         assert!(validate_github_repository_name("owner/repo name").is_err());
+    }
+
+    #[test]
+    fn managed_scope_excludes_remembered_articles_and_their_assets() {
+        let root = PathBuf::from("/tmp/cloudstack-scope-test");
+        let mut config = ProjectConfig::default();
+        config.git.excluded_articles = vec!["draft.md".into()];
+        let ctx = ProjectContext {
+            content_root: root.join("src/content/blog"),
+            config_path: root.join(".cloudstack.json"),
+            root,
+            config,
+        };
+        let status = parse_porcelain_v2(
+            &porcelain(&[
+                "? src/content/blog/draft.md",
+                "? src/content/blog/draft/photo.png",
+                "? src/content/blog/published.md",
+            ]),
+            "src/content/blog",
+        );
+
+        assert_eq!(
+            ManagedScope::from_status(&ctx, &status).paths(),
+            ["src/content/blog/published.md"]
+        );
+        assert!(ManagedScope::from_selected(&ctx, &status, &["README.md".to_string()]).is_err());
+    }
+
+    #[test]
+    fn outer_article_exclusion_does_not_hide_a_nested_article_or_its_assets() {
+        let dir = tempfile::tempdir().unwrap();
+        let content_root = dir.path().join("src/content/blog");
+        std::fs::create_dir_all(content_root.join("hello/nested")).unwrap();
+        std::fs::write(content_root.join("hello.md"), "outer").unwrap();
+        std::fs::write(content_root.join("hello/nested.md"), "nested").unwrap();
+        std::fs::write(content_root.join("hello/nested/photo.png"), "image").unwrap();
+        let mut config = ProjectConfig::default();
+        config.git.excluded_articles = vec!["hello.md".into()];
+        let ctx = ProjectContext {
+            root: dir.path().to_path_buf(),
+            content_root,
+            config_path: dir.path().join(".cloudstack.json"),
+            config,
+        };
+        let status = parse_porcelain_v2(
+            &porcelain(&[
+                "? src/content/blog/hello.md",
+                "? src/content/blog/hello/outer.png",
+                "? src/content/blog/hello/nested.md",
+                "? src/content/blog/hello/nested/photo.png",
+            ]),
+            "src/content/blog",
+        );
+
+        assert_eq!(
+            ManagedScope::from_status(&ctx, &status).paths(),
+            [
+                "src/content/blog/hello/nested.md",
+                "src/content/blog/hello/nested/photo.png",
+            ]
+        );
     }
 
     // ---- 以下用真实 git 仓库跑集成测试 ----
@@ -1358,10 +1600,13 @@ mod tests {
         };
 
         let result = initialize(&ctx).unwrap();
-        assert!(result.succeeded());
+        assert!(result.succeeded(), "{:?}", result.error);
         assert_eq!(result.report.traces.len(), 1);
         assert!(result.report.traces[0].command.contains(" init -b main"));
         assert!(root.join(".git").is_dir());
+        let exclude = std::fs::read_to_string(root.join(".git/info/exclude")).unwrap();
+        assert!(exclude.lines().any(|line| line == ".cloudstack.json"));
+        assert!(exclude.lines().any(|line| line == ".blog-editor.json"));
         assert_eq!(
             snapshot(&ctx).unwrap().topology,
             RepositoryTopology::NoCommit
@@ -1465,10 +1710,7 @@ mod tests {
         assert!(result.report.traces[1].command.contains(" commit -m"));
         assert_eq!(
             result.staged_files,
-            vec![
-                ".cloudstack.json".to_string(),
-                "src/content/blog/a.md".to_string(),
-            ]
+            vec!["src/content/blog/a.md".to_string()]
         );
 
         let show = Command::new("git")
@@ -1485,8 +1727,84 @@ mod tests {
             .unwrap();
         let s = String::from_utf8_lossy(&status_after.stdout);
         assert!(s.contains("README.md"));
-        assert!(!s.contains(".cloudstack.json"));
+        assert!(s.contains(".cloudstack.json"));
         assert!(!s.contains("a.md"));
+    }
+
+    #[test]
+    fn publish_selected_commits_only_the_chosen_article_and_assets() {
+        let (_dir, ctx) = init_repo();
+        std::fs::create_dir_all(ctx.content_root.join("a")).unwrap();
+        std::fs::write(ctx.content_root.join("a.md"), "a0\n").unwrap();
+        std::fs::write(ctx.content_root.join("a/photo.png"), "a0\n").unwrap();
+        std::fs::write(ctx.content_root.join("b.md"), "b0\n").unwrap();
+        commit_all(&ctx.root, "init");
+
+        std::fs::write(ctx.content_root.join("a.md"), "a1\n").unwrap();
+        std::fs::write(ctx.content_root.join("a/photo.png"), "a1\n").unwrap();
+        std::fs::write(ctx.content_root.join("b.md"), "b1\n").unwrap();
+        let selected = vec![
+            "src/content/blog/a.md".to_string(),
+            "src/content/blog/a/photo.png".to_string(),
+        ];
+
+        let result = publish_selected(&ctx, "只更新 A", false, &selected).unwrap();
+        assert!(result.committed);
+        assert_eq!(result.staged_files, selected);
+        let remaining = status(&ctx).unwrap();
+        assert_eq!(
+            remaining
+                .changes
+                .iter()
+                .filter(|change| change.managed)
+                .map(|change| change.path.as_str())
+                .collect::<Vec<_>>(),
+            ["src/content/blog/b.md"]
+        );
+    }
+
+    #[test]
+    fn stop_tracking_config_keeps_the_file_and_commits_its_removal() {
+        let (_dir, ctx) = init_repo();
+        std::fs::write(
+            &ctx.config_path,
+            "{\"version\":1,\"contentDir\":\"src/content/blog\"}\n",
+        )
+        .unwrap();
+        std::fs::write(ctx.content_root.join("a.md"), "a\n").unwrap();
+        commit_all(&ctx.root, "init");
+        assert!(snapshot(&ctx).unwrap().config_tracked);
+
+        let result = stop_tracking_project_config(&ctx).unwrap();
+        assert!(result.succeeded(), "{:?}", result.error);
+        assert_eq!(result.report.traces.len(), 2);
+        assert!(ctx.config_path.is_file());
+        assert!(!snapshot(&ctx).unwrap().config_tracked);
+        let exclude = std::fs::read_to_string(ctx.root.join(".git/info/exclude")).unwrap();
+        assert!(exclude.lines().any(|line| line == ".cloudstack.json"));
+        let tree = Command::new("git")
+            .current_dir(&ctx.root)
+            .args(["ls-tree", "-r", "--name-only", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&tree.stdout).contains(".cloudstack.json"));
+    }
+
+    #[test]
+    fn stop_tracking_config_without_identity_never_changes_the_index() {
+        let (_dir, ctx) = init_repo();
+        std::fs::write(
+            &ctx.config_path,
+            "{\"version\":1,\"contentDir\":\"src/content/blog\"}\n",
+        )
+        .unwrap();
+        commit_all(&ctx.root, "init");
+        run(&ctx.root, &["config", "user.name", ""]);
+        run(&ctx.root, &["config", "user.email", ""]);
+
+        assert!(stop_tracking_project_config(&ctx).is_err());
+        assert!(snapshot(&ctx).unwrap().config_tracked);
+        assert!(ctx.config_path.is_file());
     }
 
     #[test]
