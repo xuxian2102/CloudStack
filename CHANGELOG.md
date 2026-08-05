@@ -15,6 +15,7 @@
 
 - Rust workspace、crate、二进制、GTK App ID、预览协议、E2E 与 Arch 安装产物统一使用
   CloudStack 标识。
+- 更新为“云朵 + 内容栈”应用图标，并同时提供 hicolor PNG 与 scalable SVG 资源。
 - 新项目配置名改为 `.cloudstack.json`；旧 `.blog-editor.json` 继续原地读写，草稿也可
   从旧应用数据目录恢复，避免升级打扰现有项目。
 

@@ -12,7 +12,8 @@ for expected in \
   usr/bin/cloudstack \
   usr/lib/cloudstack/cloudstack \
   usr/share/applications/dev.xuxian.cloudstack.desktop \
-  usr/share/icons/hicolor/512x512/apps/dev.xuxian.cloudstack.png; do
+  usr/share/icons/hicolor/512x512/apps/dev.xuxian.cloudstack.png \
+  usr/share/icons/hicolor/scalable/apps/dev.xuxian.cloudstack.svg; do
   if ! grep -Fxq "$expected" <<<"$contents"; then
     echo "Arch 包缺少：$expected" >&2
     exit 1
