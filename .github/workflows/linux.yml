@@ -62,7 +62,7 @@ jobs:
           sh -n packaging/arch/blog-editor.sh
           desktop-file-validate packaging/arch/dev.xuxian.blogeditor.desktop
           runuser --user blog-editor-ci -- \
-            env HOME=/home/blog-editor-ci \
+            env HOME=/home/blog-editor-ci BUILDDIR=/home/blog-editor-ci/build \
             makepkg --printsrcinfo --dir "$GITHUB_WORKSPACE/packaging/arch" >/dev/null
           namcap_result=$(namcap packaging/arch/PKGBUILD)
           if [[ -n "$namcap_result" ]]; then
