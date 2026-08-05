@@ -5,6 +5,7 @@ mod git_panel;
 mod publish;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -33,6 +34,8 @@ struct EditorState {
     draft_queue: drafts::DraftQueue,
     pending_assets: PendingAssetManager,
     git_snapshot: Option<RepositorySnapshot>,
+    /// 当前会话中已修改但尚未写回磁盘的文章快照。允许切换文章时保留编辑内容。
+    unsaved_documents: HashMap<String, PostDocument>,
 }
 
 enum OpenProjectOutcome {
@@ -496,6 +499,15 @@ fn connect_actions(
         if publish_state.borrow().busy {
             return;
         }
+        let unsaved_count = unsaved_document_count(&publish_state);
+        if unsaved_count > 1 {
+            toast(&publish_widgets, "请先保存其他未保存文章，再执行 Git 发布");
+            return;
+        }
+        if unsaved_count == 1 && !publish_state.borrow().dirty {
+            toast(&publish_widgets, "请先保存未保存文章，再执行 Git 发布");
+            return;
+        }
         if publish_state.borrow().dirty {
             let callback_widgets = publish_widgets.clone();
             let callback_state = Rc::clone(&publish_state);
@@ -606,10 +618,6 @@ fn connect_post_list(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
         .post_list
         .clone()
         .connect_row_activated(move |_, row| {
-            if state.borrow().dirty {
-                toast(&widgets, "请先保存当前文章，再切换到其他文章");
-                return;
-            }
             let index = row.index();
             let Ok(index) = usize::try_from(index) else {
                 return;
@@ -626,8 +634,8 @@ fn select_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     if state_snapshot.busy {
         return;
     }
-    if state_snapshot.dirty {
-        toast(widgets, "当前文章尚未保存，暂时不能切换项目");
+    if !state_snapshot.unsaved_documents.is_empty() {
+        toast(widgets, "当前项目有未保存文章，请先保存后再切换项目");
         return;
     }
     drop(state_snapshot);
@@ -693,7 +701,6 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
             let mut content_repair = None;
             match result {
                 Ok(OpenProjectOutcome::Opened(context, post_summaries)) => {
-                    populate_post_list(&widgets, &post_summaries);
                     widgets
                         .project_label
                         .set_label(&context.root.display().to_string());
@@ -707,9 +714,12 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
                     editor_state.posts = post_summaries;
                     editor_state.document = None;
                     editor_state.dirty = false;
+                    editor_state.unsaved_documents.clear();
                     editor_state.document_epoch = editor_state.document_epoch.wrapping_add(1);
                     let epoch = editor_state.document_epoch;
                     drop(editor_state);
+                    let post_summaries = state.borrow().posts.clone();
+                    populate_post_list(&widgets, &state, &post_summaries);
                     widgets.buffer.set_text("从左侧选择一篇文章。\n");
                     state.borrow_mut().loading_buffer = false;
                     widgets.preview.clear(epoch);
@@ -926,16 +936,21 @@ fn initialize_and_open_project(
     );
 }
 
-fn populate_post_list(widgets: &Widgets, post_summaries: &[PostSummary]) {
+fn populate_post_list(
+    widgets: &Widgets,
+    state: &Rc<RefCell<EditorState>>,
+    post_summaries: &[PostSummary],
+) {
     while let Some(child) = widgets.post_list.first_child() {
         widgets.post_list.remove(&child);
     }
     for post in post_summaries {
+        let unsaved = state.borrow().unsaved_documents.contains_key(&post.id);
         let label = gtk::Label::builder()
-            .label(&post.relative_path)
+            .label(post_list_label(&post.relative_path, unsaved).as_str())
             .xalign(0.0)
             .ellipsize(gtk::pango::EllipsizeMode::Middle)
-            .tooltip_text(&post.relative_path)
+            .tooltip_text(post_list_tooltip(&post.relative_path, unsaved).as_str())
             .margin_top(8)
             .margin_bottom(8)
             .margin_start(10)
@@ -945,14 +960,79 @@ fn populate_post_list(widgets: &Widgets, post_summaries: &[PostSummary]) {
     }
 }
 
+fn post_list_label(relative_path: &str, unsaved: bool) -> String {
+    if unsaved {
+        format!("* {relative_path}")
+    } else {
+        relative_path.to_owned()
+    }
+}
+
+fn post_list_tooltip(relative_path: &str, unsaved: bool) -> String {
+    if unsaved {
+        format!("{relative_path}（有未保存修改）")
+    } else {
+        relative_path.to_owned()
+    }
+}
+
+fn update_post_marker(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, post_id: &str) {
+    let (index, relative_path, unsaved) = {
+        let state = state.borrow();
+        let Some((index, post)) = state
+            .posts
+            .iter()
+            .enumerate()
+            .find(|(_, post)| post.id == post_id)
+        else {
+            return;
+        };
+        (
+            index,
+            post.relative_path.clone(),
+            state.unsaved_documents.contains_key(post_id),
+        )
+    };
+    let Ok(index) = i32::try_from(index) else {
+        return;
+    };
+    let Some(row) = widgets.post_list.row_at_index(index) else {
+        return;
+    };
+    let Some(label) = row
+        .child()
+        .and_then(|child| child.downcast::<gtk::Label>().ok())
+    else {
+        return;
+    };
+    label.set_label(&post_list_label(&relative_path, unsaved));
+    label.set_tooltip_text(Some(&post_list_tooltip(&relative_path, unsaved)));
+}
+
 fn load_document(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, post_id: &str) {
-    if state.borrow().busy {
+    let (context, unsaved_document, already_open) = {
+        let state = state.borrow();
+        let context = state.project.clone();
+        let unsaved_document = state.unsaved_documents.get(post_id).cloned();
+        let already_open = state
+            .document
+            .as_ref()
+            .is_some_and(|document| document.id == post_id);
+        (context, unsaved_document, already_open)
+    };
+    if already_open || state.borrow().busy {
         return;
     }
-    let context = match state.borrow().project.clone() {
-        Some(context) => context,
-        None => return,
+    let Some(context) = context else {
+        return;
     };
+    // 文章切换后自动保存队列仍可能继续写入旧文章，因此必须在切换前把当前
+    // 快照排入队列，避免延迟计时器读取到新文章。
+    drafts::flush_current(widgets, state);
+    if let Some(document) = unsaved_document {
+        display_document(widgets, state, document, true);
+        return;
+    }
     set_busy(widgets, state, true, "正在打开文章…");
     let post_id = post_id.to_owned();
     let recovery_context = context.clone();
@@ -963,7 +1043,7 @@ fn load_document(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, post_id: &
         move |result| {
             match result {
                 Ok(document) => {
-                    let epoch = display_document(&widgets, &state, document.clone());
+                    let epoch = display_document(&widgets, &state, document.clone(), false);
                     drafts::inspect_loaded_document(
                         &widgets,
                         &state,
@@ -983,21 +1063,29 @@ fn display_document(
     widgets: &Widgets,
     state: &Rc<RefCell<EditorState>>,
     document: PostDocument,
+    dirty: bool,
 ) -> u64 {
     {
         let mut state = state.borrow_mut();
         state.loading_buffer = true;
         state.document = Some(document.clone());
-        state.dirty = false;
+        state.dirty = dirty;
         state.document_epoch = state.document_epoch.wrapping_add(1);
     }
     widgets.buffer.set_text(&document.body);
     widgets.editor.grab_focus();
-    widgets.status_label.set_label(&document.relative_path);
-    widgets.window.set_title(Some(&format!(
-        "{} — 云栈 CloudStack",
-        document.relative_path
-    )));
+    let status = if dirty {
+        format!("{} · 未保存", document.relative_path)
+    } else {
+        document.relative_path.clone()
+    };
+    widgets.status_label.set_label(&status);
+    let title = if dirty {
+        format!("* {} — 云栈 CloudStack", document.relative_path)
+    } else {
+        format!("{} — 云栈 CloudStack", document.relative_path)
+    };
+    widgets.window.set_title(Some(&title));
     let mut editor_state = state.borrow_mut();
     editor_state.loading_buffer = false;
     let epoch = editor_state.document_epoch;
@@ -1009,6 +1097,9 @@ fn display_document(
             .set_document(context, document.id.clone(), epoch, document.body.clone());
     }
     frontmatter::refresh(widgets, state);
+    // 内存快照切换不会经过异步打开回调里的 `set_busy(false)`，因此这里必须
+    // 立即按当前文章的 dirty 状态同步保存按钮、编辑器和属性面板。
+    sync_controls(widgets, state);
     #[cfg(feature = "e2e")]
     if std::env::var_os("CLOUDSTACK_E2E_PROPERTIES_OPEN").is_some() {
         widgets.frontmatter_split.set_show_sidebar(true);
@@ -1081,11 +1172,13 @@ fn save_document_then(
                             editor_state
                                 .pending_assets
                                 .confirm_post(&context.root, &document.id);
+                            editor_state.unsaved_documents.remove(&document.id);
                             editor_state.dirty = false;
                             true
                         }
                     };
                     if saved_current {
+                        update_post_marker(&widgets, &state, &document.id);
                         widgets.status_label.set_label(&document.relative_path);
                         toast(&widgets, "文章已保存");
                         drafts::delete_for_post(&widgets, &state, context, document.id);
@@ -1106,13 +1199,27 @@ fn save_document_then(
 }
 
 fn mark_document_dirty(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
-    {
+    let post_id = {
+        let body = widgets
+            .buffer
+            .text(
+                &widgets.buffer.start_iter(),
+                &widgets.buffer.end_iter(),
+                true,
+            )
+            .to_string();
         let mut state = state.borrow_mut();
-        if state.document.is_none() {
+        let Some(document) = state.document.clone() else {
             return;
-        }
+        };
         state.dirty = true;
-    }
+        let mut snapshot = document;
+        snapshot.body = body;
+        let post_id = snapshot.id.clone();
+        state.unsaved_documents.insert(post_id.clone(), snapshot);
+        post_id
+    };
+    update_post_marker(widgets, state, &post_id);
     sync_controls(widgets, state);
     if let Some(document) = &state.borrow().document {
         widgets
@@ -1152,7 +1259,8 @@ fn sync_controls(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     let state = state.borrow();
     let has_project = state.project.is_some();
     let has_document = state.document.is_some();
-    let stable = !state.busy && !state.dirty;
+    let has_unsaved_documents = !state.unsaved_documents.is_empty();
+    let stable = !state.busy && !has_unsaved_documents;
     widgets.open_button.set_sensitive(stable);
     widgets.new_button.set_sensitive(has_project && stable);
     widgets.rename_button.set_sensitive(has_document && stable);
@@ -1172,9 +1280,18 @@ fn sync_controls(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     widgets
         .git_panel
         .reflect_unsaved_editor(state.dirty, has_project && !state.busy);
+    widgets.post_list.set_sensitive(has_project && !state.busy);
     if !has_document {
         widgets.frontmatter_split.set_show_sidebar(false);
     }
+}
+
+fn has_unsaved_documents(state: &Rc<RefCell<EditorState>>) -> bool {
+    !state.borrow().unsaved_documents.is_empty()
+}
+
+fn unsaved_document_count(state: &Rc<RefCell<EditorState>>) -> usize {
+    state.borrow().unsaved_documents.len()
 }
 
 fn connect_close_guard(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
@@ -1185,25 +1302,73 @@ fn connect_close_guard(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
             toast(&widgets, "文件操作正在进行，请稍候再关闭");
             return glib::Propagation::Stop;
         }
-        if !state.borrow().dirty {
+        if !has_unsaved_documents(&state) {
             if let Err(error) = state.borrow_mut().pending_assets.discard_all() {
                 log::warn!("退出时清理待提交图片失败：{error}");
             }
             return glib::Propagation::Proceed;
         }
 
+        let unsaved_documents = {
+            let state = state.borrow();
+            let mut documents = state
+                .unsaved_documents
+                .values()
+                .map(|document| document.relative_path.clone())
+                .collect::<Vec<_>>();
+            documents.sort();
+            documents
+        };
+        let multiple = unsaved_documents.len() > 1;
+        let body = if multiple {
+            format!(
+                "关闭窗口前请选择如何处理 {} 篇未保存文章：\n{}",
+                unsaved_documents.len(),
+                unsaved_documents.join("\n")
+            )
+        } else {
+            format!(
+                "文章“{}”尚未保存。关闭窗口前请选择如何处理它。",
+                unsaved_documents
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("当前文章")
+            )
+        };
         let dialog = adw::AlertDialog::builder()
-            .heading("放弃未保存的修改？")
-            .body("关闭窗口会丢失当前文章中尚未保存的修改。")
+            .heading(if multiple {
+                "有多篇文章尚未保存"
+            } else {
+                "文章尚未保存"
+            })
+            .body(body)
             .default_response("cancel")
             .close_response("cancel")
             .build();
-        dialog.add_responses(&[("cancel", "继续编辑"), ("discard", "放弃并关闭")]);
+        if multiple {
+            dialog.add_responses(&[
+                ("cancel", "继续编辑"),
+                ("discard", "全部不保存"),
+                ("save", "保存全部"),
+            ]);
+        } else {
+            dialog.add_responses(&[
+                ("cancel", "取消"),
+                ("discard", "不保存并关闭"),
+                ("save", "保存并关闭"),
+            ]);
+        }
         dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+        dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
         let close_widgets = widgets.clone();
         let close_state = Rc::clone(&state);
         dialog.connect_response(Some("discard"), move |_, _| {
             drafts::discard_and_close(&close_widgets, &close_state);
+        });
+        let save_widgets = widgets.clone();
+        let save_state = Rc::clone(&state);
+        dialog.connect_response(Some("save"), move |_, _| {
+            drafts::save_and_close(&save_widgets, &save_state);
         });
         dialog.present(Some(&widgets.window));
         glib::Propagation::Stop
@@ -1233,5 +1398,15 @@ mod tests {
         assert_eq!(initial_content_split_position(0, 700), 340);
         assert_eq!(initial_content_split_position(120, 400), 120);
         assert_eq!(initial_content_split_position(0, 0), 0);
+    }
+
+    #[test]
+    fn unsaved_post_marker_is_visible_without_changing_the_path() {
+        assert_eq!(post_list_label("nested/post.md", false), "nested/post.md");
+        assert_eq!(post_list_label("nested/post.md", true), "* nested/post.md");
+        assert_eq!(
+            post_list_tooltip("nested/post.md", true),
+            "nested/post.md（有未保存修改）"
+        );
     }
 }

@@ -9,7 +9,10 @@ use cloudstack_core::model::{
 use cloudstack_core::services::git;
 use gtk::glib;
 
-use super::{open_project, set_busy, show_error, toast, EditorState, Widgets};
+use super::{
+    has_unsaved_documents, open_project, set_busy, show_error, toast, unsaved_document_count,
+    EditorState, Widgets,
+};
 use crate::tasks;
 
 const MAX_DISPLAYED_CHANGES: usize = 100;
@@ -637,7 +640,12 @@ pub(super) fn activate_primary(widgets: &Widgets, state: &Rc<RefCell<EditorState
     if state.borrow().busy {
         return;
     }
-    if state.borrow().dirty {
+    let unsaved_count = unsaved_document_count(state);
+    if unsaved_count > 1 {
+        toast(widgets, "请先保存其他未保存文章，再执行 Git 操作");
+        return;
+    }
+    if has_unsaved_documents(state) {
         if gtk::prelude::WidgetExt::activate_action(&widgets.window, "win.publish", None).is_err() {
             show_error(widgets, "无法保存并打开提交窗口");
         }
@@ -840,9 +848,10 @@ fn execute_operation<Work>(
         + Send
         + 'static,
 {
+    let has_unsaved = has_unsaved_documents(state);
     let context = {
         let state = state.borrow();
-        if state.busy || (completion == Completion::ReloadProject && state.dirty) {
+        if state.busy || (completion == Completion::ReloadProject && has_unsaved) {
             return;
         }
         let Some(context) = &state.project else {

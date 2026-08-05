@@ -5,15 +5,16 @@ use adw::prelude::*;
 use cloudstack_core::services::posts;
 
 use super::{
-    display_document, drafts, git_panel, populate_post_list, set_busy, show_error, toast,
-    EditorState, Widgets,
+    display_document, drafts, git_panel, has_unsaved_documents, populate_post_list, set_busy,
+    show_error, toast, EditorState, Widgets,
 };
 use crate::tasks;
 
 pub(super) fn show_create_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
+    let has_unsaved = has_unsaved_documents(state);
     let context = {
         let state = state.borrow();
-        if state.busy || state.dirty {
+        if state.busy || has_unsaved {
             return;
         }
         let Some(context) = &state.project else {
@@ -77,9 +78,9 @@ fn create_post(
         move |result| {
             match result {
                 Ok((document, summaries)) => {
-                    populate_post_list(&widgets, &summaries);
+                    populate_post_list(&widgets, &state, &summaries);
                     state.borrow_mut().posts = summaries;
-                    display_document(&widgets, &state, document);
+                    display_document(&widgets, &state, document, false);
                     toast(&widgets, "文章已创建");
                 }
                 Err(error) => show_error(&widgets, &error.to_string()),
@@ -91,9 +92,10 @@ fn create_post(
 }
 
 pub(super) fn show_rename_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
+    let has_unsaved = has_unsaved_documents(state);
     let (context, document) = {
         let state = state.borrow();
-        if state.busy || state.dirty {
+        if state.busy || has_unsaved {
             return;
         }
         let (Some(context), Some(document)) = (&state.project, &state.document) else {
@@ -163,7 +165,7 @@ fn rename_post(
         move |result| {
             match result {
                 Ok((renamed, summaries)) => {
-                    populate_post_list(&widgets, &summaries);
+                    populate_post_list(&widgets, &state, &summaries);
                     let mut editor_state = state.borrow_mut();
                     editor_state.posts = summaries;
                     editor_state
@@ -171,7 +173,7 @@ fn rename_post(
                         .forget_post(&context.root, &old_id);
                     drop(editor_state);
                     drafts::delete_for_post(&widgets, &state, context.clone(), old_id.clone());
-                    display_document(&widgets, &state, renamed);
+                    display_document(&widgets, &state, renamed, false);
                     toast(&widgets, "文章已重命名");
                 }
                 Err(error) => show_error(&widgets, &error.to_string()),
@@ -183,9 +185,10 @@ fn rename_post(
 }
 
 pub(super) fn show_delete_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
+    let has_unsaved = has_unsaved_documents(state);
     let (context, document) = {
         let state = state.borrow();
-        if state.busy || state.dirty {
+        if state.busy || has_unsaved {
             return;
         }
         let (Some(context), Some(document)) = (&state.project, &state.document) else {
@@ -233,7 +236,7 @@ fn delete_post(
         move |result| {
             match result {
                 Ok(summaries) => {
-                    populate_post_list(&widgets, &summaries);
+                    populate_post_list(&widgets, &state, &summaries);
                     let mut editor_state = state.borrow_mut();
                     editor_state.posts = summaries;
                     editor_state.document = None;

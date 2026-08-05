@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use adw::prelude::*;
 use cloudstack_core::model::{DraftDocument, PostDocument, ProjectContext};
-use cloudstack_core::services::drafts;
+use cloudstack_core::services::{drafts, posts};
 use cloudstack_core::AppError;
 
 use super::{set_busy, show_error, sync_controls, EditorState, Widgets};
@@ -68,6 +68,22 @@ impl DraftStorage {
     }
 }
 
+pub(super) struct BatchFailure {
+    pub relative_path: String,
+    pub error: String,
+}
+
+pub(super) struct BatchSaveReport {
+    pub saved: Vec<PostDocument>,
+    pub failed: Vec<BatchFailure>,
+    pub cleanup_warnings: Vec<String>,
+}
+
+pub(super) struct DiscardReport {
+    pub discarded: Vec<String>,
+    pub failed: Vec<BatchFailure>,
+}
+
 #[derive(Default)]
 pub(super) struct DraftQueue {
     active: bool,
@@ -94,7 +110,16 @@ enum Operation {
         storage: DraftStorage,
         context: ProjectContext,
         post_id: String,
-        close_after: bool,
+    },
+    SaveAndClose {
+        storage: DraftStorage,
+        context: ProjectContext,
+        documents: Vec<PostDocument>,
+    },
+    DiscardAndClose {
+        storage: DraftStorage,
+        context: ProjectContext,
+        documents: Vec<PostDocument>,
     },
 }
 
@@ -111,19 +136,17 @@ enum Completion {
     },
     Deleted {
         post_id: String,
-        close_after: bool,
         result: Result<(), AppError>,
     },
+    BatchSaved(BatchSaveReport),
+    Discarded(DiscardReport),
 }
 
 impl Operation {
     fn closes_window(&self) -> bool {
         matches!(
             self,
-            Self::Delete {
-                close_after: true,
-                ..
-            }
+            Self::SaveAndClose { .. } | Self::DiscardAndClose { .. }
         )
     }
 
@@ -159,17 +182,81 @@ impl Operation {
                 storage,
                 context,
                 post_id,
-                close_after,
             } => {
                 let result = storage.delete(&context, &post_id);
-                Completion::Deleted {
-                    post_id,
-                    close_after,
-                    result,
-                }
+                Completion::Deleted { post_id, result }
             }
+            Self::SaveAndClose {
+                storage,
+                context,
+                documents,
+            } => Completion::BatchSaved(save_documents(&storage, &context, documents)),
+            Self::DiscardAndClose {
+                storage,
+                context,
+                documents,
+            } => Completion::Discarded(discard_documents(&storage, &context, documents)),
         }
     }
+}
+
+fn save_documents(
+    storage: &DraftStorage,
+    context: &ProjectContext,
+    documents: Vec<PostDocument>,
+) -> BatchSaveReport {
+    let mut report = BatchSaveReport {
+        saved: Vec::new(),
+        failed: Vec::new(),
+        cleanup_warnings: Vec::new(),
+    };
+    for document in documents {
+        match posts::write_post(
+            context,
+            &document.id,
+            document.raw_frontmatter.as_deref(),
+            &document.body,
+            &document.revision,
+        ) {
+            Ok(revision) => {
+                let mut saved = document;
+                saved.revision = revision;
+                if let Err(error) = storage.delete(context, &saved.id) {
+                    report.cleanup_warnings.push(format!(
+                        "{}：文章已保存，但清理自动恢复草稿失败：{error}",
+                        saved.relative_path
+                    ));
+                }
+                report.saved.push(saved);
+            }
+            Err(error) => report.failed.push(BatchFailure {
+                relative_path: document.relative_path,
+                error: error.to_string(),
+            }),
+        }
+    }
+    report
+}
+
+fn discard_documents(
+    storage: &DraftStorage,
+    context: &ProjectContext,
+    documents: Vec<PostDocument>,
+) -> DiscardReport {
+    let mut report = DiscardReport {
+        discarded: Vec::new(),
+        failed: Vec::new(),
+    };
+    for document in documents {
+        match storage.delete(context, &document.id) {
+            Ok(()) => report.discarded.push(document.id),
+            Err(error) => report.failed.push(BatchFailure {
+                relative_path: document.relative_path,
+                error: error.to_string(),
+            }),
+        }
+    }
+    report
 }
 
 fn draft_storage() -> DraftStorage {
@@ -229,21 +316,80 @@ pub(super) fn delete_for_post(
     context: ProjectContext,
     post_id: String,
 ) {
-    enqueue_delete(widgets, state, context, post_id, false);
+    enqueue_delete(widgets, state, context, post_id);
+}
+
+pub(super) fn save_and_close(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
+    cancel_timer(state);
+    let (context, mut documents) = {
+        let state = state.borrow();
+        let Some(context) = &state.project else {
+            return widgets.window.close();
+        };
+        (
+            context.clone(),
+            state
+                .unsaved_documents
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+    };
+    documents.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    if documents.is_empty() {
+        set_busy(widgets, state, false, "");
+        widgets.window.close();
+        return;
+    }
+
+    set_busy(widgets, state, true, "正在保存未保存文章…");
+    enqueue(
+        widgets,
+        state,
+        Operation::SaveAndClose {
+            storage: draft_storage(),
+            context,
+            documents,
+        },
+    );
 }
 
 pub(super) fn discard_and_close(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     cancel_timer(state);
-    let current = {
+    let (context, mut documents) = {
         let state = state.borrow();
-        let (Some(context), Some(document)) = (&state.project, &state.document) else {
+        let Some(context) = &state.project else {
             return widgets.window.close();
         };
-        (context.clone(), document.id.clone())
+        (
+            context.clone(),
+            state
+                .unsaved_documents
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
     };
+    documents.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    if documents.is_empty() {
+        set_busy(widgets, state, false, "");
+        widgets.window.close();
+        return;
+    }
 
-    set_busy(widgets, state, true, "正在清理自动恢复草稿…");
-    enqueue_delete(widgets, state, current.0, current.1, true);
+    if let Err(error) = state.borrow_mut().pending_assets.discard_all() {
+        log::warn!("退出时清理待提交图片失败：{error}");
+    }
+    set_busy(widgets, state, true, "正在放弃未保存文章…");
+    enqueue(
+        widgets,
+        state,
+        Operation::DiscardAndClose {
+            storage: draft_storage(),
+            context,
+            documents,
+        },
+    );
 }
 
 fn cancel_timer(state: &Rc<RefCell<EditorState>>) {
@@ -291,7 +437,6 @@ fn enqueue_delete(
     state: &Rc<RefCell<EditorState>>,
     context: ProjectContext,
     post_id: String,
-    close_after: bool,
 ) {
     enqueue(
         widgets,
@@ -300,7 +445,6 @@ fn enqueue_delete(
             storage: draft_storage(),
             context,
             post_id,
-            close_after,
         },
     );
 }
@@ -386,25 +530,8 @@ fn handle_completion(
             }
             Err(_) => {}
         },
-        Completion::Deleted {
-            post_id,
-            close_after,
-            result,
-        } => {
-            if close_after {
-                match result {
-                    Ok(()) => {
-                        state.borrow_mut().dirty = false;
-                        set_busy(widgets, state, false, "");
-                        widgets.window.close();
-                        return true;
-                    }
-                    Err(error) => {
-                        set_busy(widgets, state, false, "");
-                        show_error(widgets, &format!("清理自动恢复草稿失败：{error}"));
-                    }
-                }
-            } else if let Err(error) = result {
+        Completion::Deleted { post_id, result } => {
+            if let Err(error) = result {
                 let is_current = state
                     .borrow()
                     .document
@@ -415,13 +542,122 @@ fn handle_completion(
                 }
             }
         }
+        Completion::BatchSaved(report) => return complete_batch_save(widgets, state, report),
+        Completion::Discarded(report) => return complete_discard(widgets, state, report),
     }
+    false
+}
+
+fn complete_batch_save(
+    widgets: &Widgets,
+    state: &Rc<RefCell<EditorState>>,
+    report: BatchSaveReport,
+) -> bool {
+    let saved_ids = report
+        .saved
+        .iter()
+        .map(|document| document.id.clone())
+        .collect::<Vec<_>>();
+    let project_root = state
+        .borrow()
+        .project
+        .as_ref()
+        .map(|context| context.root.clone());
+    {
+        let mut editor_state = state.borrow_mut();
+        for document in &report.saved {
+            if let Some(project_root) = &project_root {
+                editor_state
+                    .pending_assets
+                    .confirm_post(project_root, &document.id);
+            }
+            editor_state.unsaved_documents.remove(&document.id);
+            if editor_state
+                .document
+                .as_ref()
+                .is_some_and(|current| current.id == document.id)
+            {
+                editor_state.document = Some(document.clone());
+            }
+        }
+        let current_id = editor_state
+            .document
+            .as_ref()
+            .map(|document| document.id.clone());
+        editor_state.dirty = current_id
+            .as_deref()
+            .is_some_and(|post_id| editor_state.unsaved_documents.contains_key(post_id));
+    }
+    for post_id in &saved_ids {
+        super::update_post_marker(widgets, state, post_id);
+    }
+    if !saved_ids.is_empty() {
+        super::git_panel::refresh(widgets, state);
+    }
+
+    if report.failed.is_empty() {
+        for warning in report.cleanup_warnings {
+            log::warn!("{warning}");
+        }
+        set_busy(widgets, state, false, "");
+        widgets.window.close();
+        return true;
+    }
+
+    set_busy(widgets, state, false, "");
+    let mut message = String::from("以下文章保存失败，窗口保持打开：");
+    for failure in &report.failed {
+        message.push_str(&format!("\n{}：{}", failure.relative_path, failure.error));
+    }
+    if !report.cleanup_warnings.is_empty() {
+        log::warn!("{}", report.cleanup_warnings.join("；"));
+    }
+    show_error(widgets, &message);
+    false
+}
+
+fn complete_discard(
+    widgets: &Widgets,
+    state: &Rc<RefCell<EditorState>>,
+    report: DiscardReport,
+) -> bool {
+    let discarded_ids = report.discarded.clone();
+    {
+        let mut editor_state = state.borrow_mut();
+        for post_id in &discarded_ids {
+            editor_state.unsaved_documents.remove(post_id);
+        }
+        let current_id = editor_state
+            .document
+            .as_ref()
+            .map(|document| document.id.clone());
+        editor_state.dirty = current_id
+            .as_deref()
+            .is_some_and(|post_id| editor_state.unsaved_documents.contains_key(post_id));
+    }
+    for post_id in &discarded_ids {
+        super::update_post_marker(widgets, state, post_id);
+    }
+
+    if report.failed.is_empty() {
+        set_busy(widgets, state, false, "");
+        widgets.window.close();
+        return true;
+    }
+
+    set_busy(widgets, state, false, "");
+    let mut message = String::from("以下文章的自动恢复草稿未能清理，窗口保持打开：");
+    for failure in &report.failed {
+        message.push_str(&format!("\n{}：{}", failure.relative_path, failure.error));
+    }
+    show_error(widgets, &message);
     false
 }
 
 fn can_offer_recovery(state: &Rc<RefCell<EditorState>>, post_id: &str, epoch: u64) -> bool {
     let state = state.borrow();
-    !state.dirty
+    !state.busy
+        && !state.dirty
         && state.document_epoch == epoch
         && state
             .document
@@ -475,6 +711,7 @@ fn show_recovery_dialog(
             state.loading_buffer = false;
             state.dirty = true;
         }
+        super::mark_document_dirty(&restore_widgets, &restore_state);
         restore_widgets.status_label.set_label(&format!(
             "{} · 已恢复草稿，未保存",
             restore_document.relative_path
@@ -587,5 +824,58 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(drafts::read(legacy, &context, "a.md").unwrap().is_none());
+    }
+
+    #[test]
+    fn batch_save_writes_each_snapshot_and_clears_its_draft() {
+        let (project, _app_data, context, storage) = fixture();
+        std::fs::write(context.root.join("b.md"), "old b\n").unwrap();
+        let mut first = posts::read_post(&context, "a.md").unwrap();
+        let mut second = posts::read_post(&context, "b.md").unwrap();
+        first.body = "new a\n".into();
+        second.body = "new b\n".into();
+        write_at(&storage.primary, &context, "new a\n");
+
+        let report = save_documents(&storage, &context, vec![first, second]);
+
+        assert!(report.failed.is_empty());
+        assert_eq!(report.saved.len(), 2);
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("a.md")).unwrap(),
+            "new a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("b.md")).unwrap(),
+            "new b\n"
+        );
+        assert!(storage.read(&context, "a.md").unwrap().is_none());
+    }
+
+    #[test]
+    fn batch_save_keeps_external_conflict_as_a_failed_article() {
+        let (_project, _app_data, context, storage) = fixture();
+        let mut document = posts::read_post(&context, "a.md").unwrap();
+        document.body = "edited\n".into();
+        std::fs::write(context.root.join("a.md"), "changed elsewhere\n").unwrap();
+
+        let report = save_documents(&storage, &context, vec![document]);
+
+        assert!(report.saved.is_empty());
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].relative_path, "a.md");
+        assert!(report.failed[0].error.contains("外部"));
+    }
+
+    #[test]
+    fn batch_discard_removes_all_recovery_drafts() {
+        let (_project, _app_data, context, storage) = fixture();
+        write_at(&storage.primary, &context, "discard me");
+        let document = posts::read_post(&context, "a.md").unwrap();
+
+        let report = discard_documents(&storage, &context, vec![document]);
+
+        assert_eq!(report.discarded, vec!["a.md"]);
+        assert!(report.failed.is_empty());
+        assert!(storage.read(&context, "a.md").unwrap().is_none());
     }
 }

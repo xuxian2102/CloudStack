@@ -8,7 +8,8 @@ use cloudstack_core::model::{ChangeKind, GitStatus, PostSummary, ProjectContext,
 use cloudstack_core::services::{git, project};
 
 use super::{
-    git_panel, git_panel::operation_log, set_busy, show_error, toast, EditorState, Widgets,
+    git_panel, git_panel::operation_log, has_unsaved_documents, set_busy, show_error, toast,
+    EditorState, Widgets,
 };
 use crate::tasks;
 
@@ -420,9 +421,10 @@ fn article_for_git_path(
 }
 
 pub(super) fn show_dialog(widgets: &Widgets, state: &Rc<std::cell::RefCell<EditorState>>) {
+    let has_unsaved = has_unsaved_documents(state);
     let (context, posts) = {
         let state = state.borrow();
-        if state.busy || state.dirty {
+        if state.busy || state.dirty || has_unsaved {
             return;
         }
         let Some(context) = &state.project else {
