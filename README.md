@@ -3,7 +3,7 @@
 [![Arch Wayland CI](https://github.com/xuxian2102/CloudStack/actions/workflows/linux.yml/badge.svg)](https://github.com/xuxian2102/CloudStack/actions/workflows/linux.yml)
 
 云栈（CloudStack）是一个只面向 **Arch Linux rolling + 原生 Wayland** 的个人 Markdown
-编辑器。`v0.2.0` 使用纯 Rust、GTK4、libadwaita、GtkSourceView 5 和 WebKitGTK 6，
+编辑器。`v0.2.1` 使用纯 Rust、GTK4、libadwaita、GtkSourceView 5 和 WebKitGTK 6，
 不再包含 Tauri、React、Node.js 或 Vite 构建链。
 
 早期 Tauri 版本及其历史保留在
