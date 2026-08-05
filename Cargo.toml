@@ -1,8 +1,8 @@
 [workspace]
 members = [
-  "crates/blog-core",
-  "crates/blog-gtk",
-  "crates/blog-renderer",
+  "crates/cloudstack-core",
+  "crates/cloudstack-gtk",
+  "crates/cloudstack-renderer",
 ]
 resolver = "2"
 

@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use blog_editor_core::services::posts;
+use cloudstack_core::services::posts;
 
 use super::{
     display_document, drafts, populate_post_list, set_busy, show_error, toast, EditorState, Widgets,
@@ -61,7 +61,7 @@ pub(super) fn show_create_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorSta
 fn create_post(
     widgets: &Widgets,
     state: &Rc<RefCell<EditorState>>,
-    context: blog_editor_core::ProjectContext,
+    context: cloudstack_core::ProjectContext,
     id: String,
 ) {
     set_busy(widgets, state, true, "正在创建文章…");
@@ -142,8 +142,8 @@ pub(super) fn show_rename_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorSta
 fn rename_post(
     widgets: &Widgets,
     state: &Rc<RefCell<EditorState>>,
-    context: blog_editor_core::ProjectContext,
-    document: blog_editor_core::PostDocument,
+    context: cloudstack_core::ProjectContext,
+    document: cloudstack_core::PostDocument,
     new_id: String,
 ) {
     set_busy(widgets, state, true, "正在重命名文章…");
@@ -214,8 +214,8 @@ pub(super) fn show_delete_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorSta
 fn delete_post(
     widgets: &Widgets,
     state: &Rc<RefCell<EditorState>>,
-    context: blog_editor_core::ProjectContext,
-    document: blog_editor_core::PostDocument,
+    context: cloudstack_core::ProjectContext,
+    document: cloudstack_core::PostDocument,
 ) {
     set_busy(widgets, state, true, "正在删除文章…");
     let post_id = document.id.clone();

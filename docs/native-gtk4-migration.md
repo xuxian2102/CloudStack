@@ -10,13 +10,13 @@ GDK、GIO 和 libadwaita 接管平台能力。
 
 ```text
 Cargo.toml                 原生应用 workspace
-crates/blog-core/          不依赖任何 UI 框架的领域核心
-crates/blog-renderer/      Markdown 与纯 Rust KaTeX 静态渲染
-crates/blog-gtk/           GTK4/libadwaita 应用和交互状态
+crates/cloudstack-core/          不依赖任何 UI 框架的领域核心
+crates/cloudstack-renderer/      Markdown 与纯 Rust KaTeX 静态渲染
+crates/cloudstack-gtk/           GTK4/libadwaita 应用和交互状态
 test/                      无 XWayland 的原生 Wayland 冒烟测试
 ```
 
-`blog-editor-core` 当前包含：
+`cloudstack-core` 当前包含：
 
 - 项目配置读取、验证和原子更新；
 - 文章列表、Frontmatter 拆装、原子写入与外部修改冲突检测；
@@ -31,7 +31,7 @@ test/                      无 XWayland 的原生 Wayland 冒烟测试
 ## 已接通的原生流程
 
 - `AdwApplication` 窗口与原生关闭生命周期；
-- GTK 文件夹选择器打开含 `.blog-editor.json` 的项目；
+- GTK 文件夹选择器打开含 `.cloudstack.json` 的项目，并兼容旧 `.blog-editor.json`；
 - 左侧文章列表；
 - GtkSourceView 只编辑 Markdown 正文，Frontmatter 不在文中显示；
 - Markdown 语法高亮、行号、当前行、括号匹配、自动缩进和原生撤销栈；
@@ -44,13 +44,13 @@ test/                      无 XWayland 的原生 Wayland 冒烟测试
 - Frontmatter 可按文章选择添加或移除，新文章默认是普通 Markdown；
 - 原生 Frontmatter 属性面板支持字符串、布尔值和标签字段，日期通过 GTK 日历选择；
 - 表单通过 lossless YAML CST 定点修改字段，保留注释、顺序、布局和未配置字段；
-- 独立 `blog-renderer` 使用 pulldown-cmark 与纯 Rust KaTeX 生成静态 HTML + MathML；
+- 独立 `cloudstack-renderer` 使用 pulldown-cmark 与纯 Rust KaTeX 生成静态 HTML + MathML；
 - Markdown 渲染、图片扫描和路径改写共用同一套方言配置；
 - 公式错误带源码字节范围返回，用户原始 HTML 默认转义；
 - WebKitGTK 6 左右双栏实时预览，按正文大小做 200/350/500ms 防抖；
 - Markdown 在 GIO 后台线程渲染，单任务队列只保留最新输入，并用文章 epoch 与
   generation 丢弃过期结果；
-- KaTeX CSS/字体由 `blog-editor:` 只读协议提供，文章图片仍通过 core 的路径、
+- KaTeX CSS/字体由 `cloudstack:` 只读协议提供，文章图片仍通过 core 的路径、
   符号链接、类型与 25 MiB 限制读取，不开放 `file:`；
 - 预览使用严格 CSP 和隔离脚本 world，参数化替换正文，外部导航只放行用户点击的
   HTTP(S)/mailto 并交给系统应用；
@@ -100,5 +100,5 @@ cargo fmt --all -- --check
 cargo check --workspace --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
-cargo run -p blog-editor-gtk --bin blog-editor
+cargo run -p cloudstack-gtk --bin cloudstack
 ```

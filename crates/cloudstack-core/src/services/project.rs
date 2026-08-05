@@ -6,7 +6,8 @@ use std::path::{Component, Path};
 use crate::error::AppError;
 use crate::model::{ProjectConfig, ProjectContext, CONFIG_VERSION};
 
-pub const CONFIG_FILE: &str = ".blog-editor.json";
+pub const CONFIG_FILE: &str = ".cloudstack.json";
+pub const LEGACY_CONFIG_FILE: &str = ".blog-editor.json";
 
 pub fn open_project(root: &Path) -> Result<ProjectContext, AppError> {
     let root = root
@@ -19,15 +20,30 @@ pub fn open_project(root: &Path) -> Result<ProjectContext, AppError> {
         )));
     }
 
-    let config_path = root.join(CONFIG_FILE);
-    let raw = fs::read_to_string(&config_path).map_err(|_| {
-        AppError::Config(format!(
-            "项目根目录缺少 {CONFIG_FILE}，请先在博客项目里创建它"
-        ))
-    })?;
+    let config_path = select_config_path(&root)?;
+    let config_name = config_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(CONFIG_FILE);
+    let raw = fs::read_to_string(&config_path)?;
     let config: ProjectConfig = serde_json::from_str(&raw)
-        .map_err(|e| AppError::Config(format!("{CONFIG_FILE} 解析失败：{e}")))?;
-    validate_project_config(&root, config)
+        .map_err(|e| AppError::Config(format!("{config_name} 解析失败：{e}")))?;
+    validate_project_config_at(&root, config, config_path)
+}
+
+fn select_config_path(root: &Path) -> Result<std::path::PathBuf, AppError> {
+    let current = root.join(CONFIG_FILE);
+    let legacy = root.join(LEGACY_CONFIG_FILE);
+    match (current.is_file(), legacy.is_file()) {
+        (true, false) => Ok(current),
+        (false, true) => Ok(legacy),
+        (true, true) => Err(AppError::Config(format!(
+            "项目同时包含 {CONFIG_FILE} 和 {LEGACY_CONFIG_FILE}，请只保留其中一个"
+        ))),
+        (false, false) => Err(AppError::Config(format!(
+            "项目根目录缺少 {CONFIG_FILE}（也未找到兼容配置 {LEGACY_CONFIG_FILE}）"
+        ))),
+    }
 }
 
 /// 打开项目与设置保存必须共用同一套校验，避免 UI 能写出下一次启动却打不开的配置。
@@ -35,6 +51,17 @@ pub fn validate_project_config(
     root: &Path,
     config: ProjectConfig,
 ) -> Result<ProjectContext, AppError> {
+    validate_project_config_at(root, config, select_config_path(root)?)
+}
+
+fn validate_project_config_at(
+    root: &Path,
+    config: ProjectConfig,
+    config_path: std::path::PathBuf,
+) -> Result<ProjectContext, AppError> {
+    if config_path != root.join(CONFIG_FILE) && config_path != root.join(LEGACY_CONFIG_FILE) {
+        return Err(AppError::Config("项目配置路径不受信任".into()));
+    }
     if config.version != CONFIG_VERSION {
         return Err(AppError::Config(format!(
             "不支持的配置版本 {}（当前支持 {CONFIG_VERSION}）",
@@ -71,6 +98,7 @@ pub fn validate_project_config(
     Ok(ProjectContext {
         root: root.to_path_buf(),
         content_root,
+        config_path,
         config,
     })
 }
@@ -78,14 +106,19 @@ pub fn validate_project_config(
 /// 保留配置里本版本不认识的键，只覆盖当前版本负责的结构化字段；这样插件或未来版本
 /// 写入的扩展配置不会因为用户打开一次设置面板就被静默删除。
 pub fn write_project_config(
-    root: &Path,
+    context: &ProjectContext,
     config: ProjectConfig,
 ) -> Result<ProjectContext, AppError> {
-    let _ = validate_project_config(root, config.clone())?;
-    let config_path = root.join(CONFIG_FILE);
-    let raw = fs::read_to_string(&config_path)?;
+    let root = &context.root;
+    let config_path = &context.config_path;
+    let _ = validate_project_config_at(root, config.clone(), config_path.clone())?;
+    let raw = fs::read_to_string(config_path)?;
+    let config_name = config_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(CONFIG_FILE);
     let mut merged: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|error| AppError::Config(format!("{CONFIG_FILE} 解析失败：{error}")))?;
+        .map_err(|error| AppError::Config(format!("{config_name} 解析失败：{error}")))?;
     let updated = serde_json::to_value(&config)
         .map_err(|error| AppError::Config(format!("配置序列化失败：{error}")))?;
     merge_json(&mut merged, updated);
@@ -98,13 +131,13 @@ pub fn write_project_config(
     let mut bytes = serde_json::to_vec_pretty(&merged)
         .map_err(|error| AppError::Config(format!("配置序列化失败：{error}")))?;
     bytes.push(b'\n');
-    let permissions = fs::metadata(&config_path)?.permissions();
+    let permissions = fs::metadata(config_path)?.permissions();
     let mut temporary = tempfile::NamedTempFile::new_in(root)?;
     temporary.as_file().set_permissions(permissions)?;
     temporary.write_all(&bytes)?;
     temporary.as_file().sync_all()?;
     temporary
-        .persist(&config_path)
+        .persist(config_path)
         .map_err(|error| AppError::Io(error.to_string()))?;
     fs::File::open(root)?.sync_all()?;
 
@@ -210,6 +243,13 @@ mod tests {
         dir
     }
 
+    fn setup_legacy(config_json: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/content/blog")).unwrap();
+        std::fs::write(dir.path().join(LEGACY_CONFIG_FILE), config_json).unwrap();
+        dir
+    }
+
     #[test]
     fn loads_valid_config_with_defaults() {
         let dir = setup(r#"{ "version": 1 }"#);
@@ -218,6 +258,24 @@ mod tests {
         assert_eq!(ctx.config.extensions, vec![".md".to_string()]);
         assert_eq!(ctx.config.assets.mode, AssetMode::Colocated);
         assert!(ctx.content_root.ends_with("src/content/blog"));
+        assert!(ctx.config_path.ends_with(CONFIG_FILE));
+    }
+
+    #[test]
+    fn loads_legacy_config_without_renaming_it() {
+        let dir = setup_legacy(r#"{ "version": 1 }"#);
+        let ctx = open_project(dir.path()).unwrap();
+        assert!(ctx.config_path.ends_with(LEGACY_CONFIG_FILE));
+        assert!(!dir.path().join(CONFIG_FILE).exists());
+    }
+
+    #[test]
+    fn rejects_projects_with_both_config_names() {
+        let dir = setup(r#"{ "version": 1 }"#);
+        std::fs::write(dir.path().join(LEGACY_CONFIG_FILE), r#"{ "version": 1 }"#).unwrap();
+        let error = open_project(dir.path()).unwrap_err().to_string();
+        assert!(error.contains(CONFIG_FILE));
+        assert!(error.contains(LEGACY_CONFIG_FILE));
     }
 
     #[test]
@@ -321,11 +379,12 @@ mod tests {
         );
         let path = dir.path().join(CONFIG_FILE);
         let before_open = fs::read_to_string(&path).unwrap();
-        let mut config = open_project(dir.path()).unwrap().config;
+        let context = open_project(dir.path()).unwrap();
+        let mut config = context.config.clone();
         assert_eq!(fs::read_to_string(&path).unwrap(), before_open);
         config.extensions = vec![".md".into(), ".markdown".into()];
 
-        let updated = write_project_config(dir.path(), config).unwrap();
+        let updated = write_project_config(&context, config).unwrap();
         assert_eq!(updated.config.extensions, vec![".md", ".markdown"]);
 
         let raw = fs::read_to_string(dir.path().join(CONFIG_FILE)).unwrap();
@@ -336,17 +395,48 @@ mod tests {
     }
 
     #[test]
+    fn writes_legacy_config_back_to_its_original_path() {
+        let dir = setup_legacy(r#"{ "version": 1, "customTool": true }"#);
+        let context = open_project(dir.path()).unwrap();
+        let mut config = context.config.clone();
+        config.extensions.push(".markdown".into());
+
+        let updated = write_project_config(&context, config).unwrap();
+
+        assert!(updated.config_path.ends_with(LEGACY_CONFIG_FILE));
+        assert!(!dir.path().join(CONFIG_FILE).exists());
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.path().join(LEGACY_CONFIG_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(value["customTool"], json!(true));
+    }
+
+    #[test]
     fn invalid_update_never_changes_the_config_file() {
         let dir = setup(r#"{ "version": 1, "customTool": "keep" }"#);
         let path = dir.path().join(CONFIG_FILE);
         let before = fs::read_to_string(&path).unwrap();
-        let mut config = open_project(dir.path()).unwrap().config;
+        let context = open_project(dir.path()).unwrap();
+        let mut config = context.config.clone();
         config.extensions = vec!["md".into()];
 
         assert!(matches!(
-            write_project_config(dir.path(), config),
+            write_project_config(&context, config),
             Err(AppError::Config(_))
         ));
         assert_eq!(fs::read_to_string(path).unwrap(), before);
+    }
+
+    #[test]
+    fn write_rejects_a_context_with_an_untrusted_config_path() {
+        let dir = setup(r#"{ "version": 1 }"#);
+        let mut context = open_project(dir.path()).unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        context.config_path = outside.path().to_path_buf();
+
+        assert!(matches!(
+            write_project_config(&context, context.config.clone()),
+            Err(AppError::Config(_))
+        ));
     }
 }

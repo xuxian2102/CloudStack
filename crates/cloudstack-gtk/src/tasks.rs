@@ -1,4 +1,4 @@
-use blog_editor_core::AppError;
+use cloudstack_core::AppError;
 
 /// 在 GIO 共享 I/O 线程池执行阻塞领域操作，再把结果送回 GTK 主线程。
 /// GTK/GObject 绝不跨线程移动；后台闭包只能捕获 Send 的纯 Rust 数据。

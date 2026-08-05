@@ -5,14 +5,68 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use adw::prelude::*;
-use blog_editor_core::model::{DraftDocument, PostDocument, ProjectContext};
-use blog_editor_core::services::drafts;
-use blog_editor_core::AppError;
+use cloudstack_core::model::{DraftDocument, PostDocument, ProjectContext};
+use cloudstack_core::services::drafts;
+use cloudstack_core::AppError;
 
 use super::{set_busy, show_error, sync_controls, EditorState, Widgets};
 use crate::tasks;
 
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(700);
+
+#[derive(Debug, Clone)]
+struct DraftStorage {
+    primary: PathBuf,
+    legacy: Option<PathBuf>,
+}
+
+impl DraftStorage {
+    fn read(
+        &self,
+        context: &ProjectContext,
+        post_id: &str,
+    ) -> Result<Option<DraftDocument>, AppError> {
+        if let Some(draft) = drafts::read(&self.primary, context, post_id)? {
+            return Ok(Some(draft));
+        }
+        match &self.legacy {
+            Some(legacy) => drafts::read(legacy, context, post_id),
+            None => Ok(None),
+        }
+    }
+
+    fn write(
+        &self,
+        context: &ProjectContext,
+        post_id: &str,
+        raw_frontmatter: Option<String>,
+        body: String,
+        base_revision: String,
+    ) -> Result<(), AppError> {
+        drafts::write(
+            &self.primary,
+            context,
+            post_id,
+            raw_frontmatter,
+            body,
+            base_revision,
+        )?;
+        if let Some(legacy) = &self.legacy {
+            drafts::delete(legacy, context, post_id)?;
+        }
+        Ok(())
+    }
+
+    fn delete(&self, context: &ProjectContext, post_id: &str) -> Result<(), AppError> {
+        // 两次删除都必须执行，避免一个目录的错误令另一个目录留下会再次出现的旧草稿。
+        let primary_result = drafts::delete(&self.primary, context, post_id);
+        let legacy_result = self
+            .legacy
+            .as_ref()
+            .map_or(Ok(()), |legacy| drafts::delete(legacy, context, post_id));
+        primary_result.and(legacy_result)
+    }
+}
 
 #[derive(Default)]
 pub(super) struct DraftQueue {
@@ -23,7 +77,7 @@ pub(super) struct DraftQueue {
 
 enum Operation {
     Write {
-        app_data_dir: PathBuf,
+        storage: DraftStorage,
         context: ProjectContext,
         post_id: String,
         raw_frontmatter: Option<String>,
@@ -31,13 +85,13 @@ enum Operation {
         base_revision: String,
     },
     Read {
-        app_data_dir: PathBuf,
+        storage: DraftStorage,
         context: ProjectContext,
         document: PostDocument,
         epoch: u64,
     },
     Delete {
-        app_data_dir: PathBuf,
+        storage: DraftStorage,
         context: ProjectContext,
         post_id: String,
         close_after: bool,
@@ -76,30 +130,24 @@ impl Operation {
     fn execute(self) -> Completion {
         match self {
             Self::Write {
-                app_data_dir,
+                storage,
                 context,
                 post_id,
                 raw_frontmatter,
                 body,
                 base_revision,
             } => {
-                let result = drafts::write(
-                    &app_data_dir,
-                    &context,
-                    &post_id,
-                    raw_frontmatter,
-                    body,
-                    base_revision,
-                );
+                let result =
+                    storage.write(&context, &post_id, raw_frontmatter, body, base_revision);
                 Completion::Written { post_id, result }
             }
             Self::Read {
-                app_data_dir,
+                storage,
                 context,
                 document,
                 epoch,
             } => {
-                let result = drafts::read(&app_data_dir, &context, &document.id);
+                let result = storage.read(&context, &document.id);
                 Completion::Read {
                     context: Box::new(context),
                     document,
@@ -108,12 +156,12 @@ impl Operation {
                 }
             }
             Self::Delete {
-                app_data_dir,
+                storage,
                 context,
                 post_id,
                 close_after,
             } => {
-                let result = drafts::delete(&app_data_dir, &context, &post_id);
+                let result = storage.delete(&context, &post_id);
                 Completion::Deleted {
                     post_id,
                     close_after,
@@ -124,13 +172,20 @@ impl Operation {
     }
 }
 
-fn app_data_dir() -> PathBuf {
+fn draft_storage() -> DraftStorage {
     #[cfg(feature = "e2e")]
-    if let Some(path) = std::env::var_os("BLOG_EDITOR_E2E_DATA_DIR") {
-        return PathBuf::from(path);
+    if let Some(path) = std::env::var_os("CLOUDSTACK_E2E_DATA_DIR") {
+        return DraftStorage {
+            primary: PathBuf::from(path),
+            legacy: std::env::var_os("CLOUDSTACK_E2E_LEGACY_DATA_DIR").map(PathBuf::from),
+        };
     }
 
-    gtk::glib::user_data_dir().join(crate::APPLICATION_ID)
+    let user_data = gtk::glib::user_data_dir();
+    DraftStorage {
+        primary: user_data.join(crate::APPLICATION_ID),
+        legacy: Some(user_data.join(crate::LEGACY_APPLICATION_ID)),
+    }
 }
 
 pub(super) fn schedule(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
@@ -160,7 +215,7 @@ pub(super) fn inspect_loaded_document(
         widgets,
         state,
         Operation::Read {
-            app_data_dir: app_data_dir(),
+            storage: draft_storage(),
             context,
             document,
             epoch,
@@ -221,7 +276,7 @@ fn enqueue_current_snapshot(widgets: &Widgets, state: &Rc<RefCell<EditorState>>)
         widgets,
         state,
         Operation::Write {
-            app_data_dir: app_data_dir(),
+            storage: draft_storage(),
             context,
             post_id: document.id,
             raw_frontmatter,
@@ -242,7 +297,7 @@ fn enqueue_delete(
         widgets,
         state,
         Operation::Delete {
-            app_data_dir: app_data_dir(),
+            storage: draft_storage(),
             context,
             post_id,
             close_after,
@@ -443,4 +498,94 @@ fn show_recovery_dialog(
         }
     });
     dialog.present(Some(&widgets.window));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cloudstack_core::model::ProjectConfig;
+
+    fn fixture() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        ProjectContext,
+        DraftStorage,
+    ) {
+        let project = tempfile::tempdir().unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let root = project.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.md"), "disk\n").unwrap();
+        let context = ProjectContext {
+            root: root.clone(),
+            content_root: root.clone(),
+            config_path: root.join(".cloudstack.json"),
+            config: ProjectConfig::default(),
+        };
+        let storage = DraftStorage {
+            primary: app_data.path().join("dev.xuxian.cloudstack"),
+            legacy: Some(app_data.path().join("dev.xuxian.blogeditor")),
+        };
+        (project, app_data, context, storage)
+    }
+
+    fn write_at(path: &std::path::Path, context: &ProjectContext, body: &str) {
+        drafts::write(
+            path,
+            context,
+            "a.md",
+            None,
+            body.to_owned(),
+            "revision".into(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn primary_draft_wins_and_legacy_is_the_fallback() {
+        let (_project, _app_data, context, storage) = fixture();
+        let legacy = storage.legacy.as_ref().unwrap();
+        write_at(legacy, &context, "legacy");
+        assert_eq!(
+            storage.read(&context, "a.md").unwrap().unwrap().body,
+            "legacy"
+        );
+
+        write_at(&storage.primary, &context, "primary");
+        assert_eq!(
+            storage.read(&context, "a.md").unwrap().unwrap().body,
+            "primary"
+        );
+    }
+
+    #[test]
+    fn writing_primary_removes_the_matching_legacy_draft() {
+        let (_project, _app_data, context, storage) = fixture();
+        let legacy = storage.legacy.as_ref().unwrap();
+        write_at(legacy, &context, "legacy");
+
+        storage
+            .write(&context, "a.md", None, "primary".into(), "revision".into())
+            .unwrap();
+
+        assert!(drafts::read(legacy, &context, "a.md").unwrap().is_none());
+        assert_eq!(
+            storage.read(&context, "a.md").unwrap().unwrap().body,
+            "primary"
+        );
+    }
+
+    #[test]
+    fn deleting_a_draft_clears_both_storage_locations() {
+        let (_project, _app_data, context, storage) = fixture();
+        let legacy = storage.legacy.as_ref().unwrap();
+        write_at(&storage.primary, &context, "primary");
+        write_at(legacy, &context, "legacy");
+
+        storage.delete(&context, "a.md").unwrap();
+
+        assert!(drafts::read(&storage.primary, &context, "a.md")
+            .unwrap()
+            .is_none());
+        assert!(drafts::read(legacy, &context, "a.md").unwrap().is_none());
+    }
 }

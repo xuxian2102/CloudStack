@@ -1,9 +1,9 @@
 # Markdown 与公式渲染
 
-原生版本通过 `blog-editor-renderer` 在 Rust 进程内把 Markdown 转为静态 HTML。
+原生版本通过 `cloudstack-renderer` 在 Rust 进程内把 Markdown 转为静态 HTML。
 数学公式由纯 Rust `katex-rs 0.2.4` 生成 HTML + MathML；WebView 不运行数学
 JavaScript。KaTeX 0.16.25 的 CSS 和字体保存在 renderer crate 中，由 GTK 的
-`blog-editor:` 只读资源协议加载。
+`cloudstack:` 只读资源协议加载。
 
 ## Markdown 方言
 

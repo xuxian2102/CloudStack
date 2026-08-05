@@ -2,8 +2,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use blog_editor_core::model::{ChangeKind, GitStatus, PublishResult};
-use blog_editor_core::services::git;
+use cloudstack_core::model::{ChangeKind, GitStatus, PublishResult};
+use cloudstack_core::services::git;
 
 use super::{set_busy, show_error, toast, EditorState, Widgets};
 use crate::tasks;
@@ -33,7 +33,7 @@ impl PublishDialog {
 
         let status_group = adw::PreferencesGroup::builder()
             .title("仓库状态")
-            .description("只会暂存内容目录与 .blog-editor.json；其他改动仅供检查。")
+            .description("只会暂存内容目录与当前项目配置文件；其他改动仅供检查。")
             .build();
         let branch_row = adw::ActionRow::builder().title("分支").build();
         branch_row.add_suffix(&branch_label);
@@ -232,7 +232,7 @@ pub(super) fn show_dialog(widgets: &Widgets, state: &Rc<std::cell::RefCell<Edito
 fn present_dialog(
     widgets: &Widgets,
     state: &Rc<std::cell::RefCell<EditorState>>,
-    context: blog_editor_core::ProjectContext,
+    context: cloudstack_core::ProjectContext,
     status: GitStatus,
 ) {
     let dialog = PublishDialog::new(&status);
@@ -296,7 +296,7 @@ fn present_dialog(
 fn refresh_status(
     widgets: &Widgets,
     state: &Rc<std::cell::RefCell<EditorState>>,
-    context: blog_editor_core::ProjectContext,
+    context: cloudstack_core::ProjectContext,
     dialog: Rc<PublishDialog>,
 ) {
     let widgets = widgets.clone();
@@ -376,7 +376,7 @@ mod tests {
             commit_hash: Some("abc123".into()),
             pushed: false,
             error_stage: Some("push".into()),
-            error: Some(blog_editor_core::error::ErrorPayload::git_push_failed(
+            error: Some(cloudstack_core::error::ErrorPayload::git_push_failed(
                 "推送失败",
             )),
         };

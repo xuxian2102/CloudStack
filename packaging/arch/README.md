@@ -12,7 +12,7 @@ makepkg -si
 release 二进制，再通过 pacman 安装：
 
 - `/usr/bin/cloudstack`：检查 `WAYLAND_DISPLAY` 并强制 GTK Wayland backend；
-- `/usr/lib/cloudstack/blog-editor`：实际 GTK4/libadwaita 二进制；
+- `/usr/lib/cloudstack/cloudstack`：实际 GTK4/libadwaita 二进制；
 - desktop entry 与 hicolor 应用图标。
 
 更新时在本目录重新运行 `makepkg -si`；卸载使用：

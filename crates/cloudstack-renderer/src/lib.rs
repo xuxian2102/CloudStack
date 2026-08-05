@@ -3,7 +3,7 @@ mod math;
 use std::borrow::Cow;
 use std::ops::Range;
 
-use blog_editor_core::services::markdown;
+use cloudstack_core::services::markdown;
 use pulldown_cmark::{html, CowStr, Event, Tag};
 use rust_embed::RustEmbed;
 

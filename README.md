@@ -8,7 +8,8 @@
 
 早期 Tauri 版本及其历史保留在
 [`Astro_Editor`](https://github.com/xuxian2102/Astro_Editor) legacy 仓库中。CloudStack
-从原生 GTK4 版本开始维护；为兼容现有博客项目，仍使用 `.blog-editor.json` 配置文件。
+从原生 GTK4 版本开始维护；新项目使用 `.cloudstack.json`，并继续兼容已有项目的
+`.blog-editor.json`。
 
 ## 功能
 
@@ -42,8 +43,9 @@ sudo pacman -Rns cloudstack-git
 
 ## 博客项目配置
 
-要打开的目录需要包含 `.blog-editor.json`。编辑器也可以作为普通笔记工具使用；
-项目目录和文章扩展名不依赖 Astro。最小配置：
+要打开的目录需要包含 `.cloudstack.json`；只有旧配置时会原地读写
+`.blog-editor.json`，不会自动改名。两个文件同时存在时应用会要求只保留一个。
+编辑器也可以作为普通笔记工具使用；项目目录和文章扩展名不依赖 Astro。最小配置：
 
 ```json
 {
@@ -72,7 +74,7 @@ Frontmatter 可以按文章一键添加或移除；未配置字段、YAML 注释
 ```bash
 sudo pacman -S --needed \
   rust git gtk4 libadwaita gtksourceview5 webkitgtk-6.0
-cargo run -p blog-editor-gtk --bin blog-editor
+cargo run -p cloudstack-gtk --bin cloudstack
 ```
 
 完整本地检查：
@@ -88,17 +90,17 @@ cargo build --workspace --release --locked
 原生 Wayland 冒烟测试还需要 `sway`、`dbus` 和 `ttf-dejavu`：
 
 ```bash
-cargo build -p blog-editor-gtk --features e2e --bin blog-editor --locked
-bash test/native-wayland-smoke.sh target/debug/blog-editor
+cargo build -p cloudstack-gtk --features e2e --bin cloudstack --locked
+bash test/native-wayland-smoke.sh target/debug/cloudstack
 ```
 
 ## 安全边界
 
 GTK 是唯一持有文件与 Git 权限的 UI。预览文档的原始 HTML会被转义，KaTeX 使用
 `trust=false`；WebView 的 CSP 禁止文档脚本、远程资源和通用文件访问。隔离脚本只做
-参数化正文替换与滚动同步，本地图片只能经 `blog-editor:` 协议和 core 路径校验读取。
+参数化正文替换与滚动同步，本地图片只能经 `cloudstack:` 协议和 core 路径校验读取。
 
-架构细节见 [原生架构](docs/blog-editor-architecture.md)，Markdown 方言见
+架构细节见 [原生架构](docs/cloudstack-architecture.md)，Markdown 方言见
 [Markdown 与公式渲染](docs/markdown-rendering.md)，Arch 包说明见
 [packaging/arch/README.md](packaging/arch/README.md)。
 

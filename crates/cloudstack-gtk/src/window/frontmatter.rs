@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use blog_editor_core::model::FieldSpec;
-use blog_editor_core::services::frontmatter::{self as frontmatter_service, FieldValue};
+use cloudstack_core::model::FieldSpec;
+use cloudstack_core::services::frontmatter::{self as frontmatter_service, FieldValue};
 
 use super::{mark_document_dirty, EditorState, Widgets};
 

@@ -4,25 +4,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use adw::prelude::*;
-use blog_editor_core::model::ProjectContext;
-use blog_editor_core::services::assets;
-use blog_editor_renderer::{MarkdownRenderer, MathIssue, RenderedDocument};
+use cloudstack_core::model::ProjectContext;
+use cloudstack_core::services::assets;
+use cloudstack_renderer::{MarkdownRenderer, MathIssue, RenderedDocument};
 use gtk::{gio, glib};
 use webkit::prelude::*;
 
 use crate::tasks;
 
-const SCRIPT_WORLD: &str = "blog-editor-preview";
+const SCRIPT_WORLD: &str = "cloudstack-preview";
 const SCRIPT_HANDLER: &str = "previewScroll";
-const PREVIEW_BASE_URI: &str = "blog-editor://preview/current/";
+const PREVIEW_BASE_URI: &str = "cloudstack://preview/current/";
 const UPDATE_FUNCTION: &str = r#"
-if (globalThis.__blogEditorPreview) {
-  globalThis.__blogEditorPreview.update(html);
+if (globalThis.__cloudstackPreview) {
+  globalThis.__cloudstackPreview.update(html);
 }
 "#;
 const SET_SCROLL_FUNCTION: &str = r#"
-if (globalThis.__blogEditorPreview) {
-  globalThis.__blogEditorPreview.setScrollRatio(ratio);
+if (globalThis.__cloudstackPreview) {
+  globalThis.__cloudstackPreview.setScrollRatio(ratio);
 }
 "#;
 
@@ -36,7 +36,7 @@ const PREVIEW_SCRIPT: &str = r#"
     return range > 0 ? Math.min(1, Math.max(0, window.scrollY / range)) : 0;
   };
 
-  globalThis.__blogEditorPreview = Object.freeze({
+  globalThis.__cloudstackPreview = Object.freeze({
     update(html) {
       const previous = ratio();
       const root = document.getElementById('preview-root');
@@ -75,8 +75,8 @@ const PREVIEW_SHELL: &str = r#"<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src blog-editor:; style-src blog-editor: 'unsafe-inline'; font-src blog-editor:; script-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
-<link rel="stylesheet" href="blog-editor://preview/app/katex.min.css">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src cloudstack:; style-src cloudstack: 'unsafe-inline'; font-src cloudstack:; script-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<link rel="stylesheet" href="cloudstack://preview/app/katex.min.css">
 <style>
 :root { color-scheme: light dark; --bg:#fff; --fg:#202124; --muted:#667085; --border:#d8dee8; --code:#f3f5f7; --accent:#3584e4; --error:#c01c28; }
 @media (prefers-color-scheme: dark) { :root { --bg:#1d1d20; --fg:#f3f3f3; --muted:#a9b0bb; --border:#41444b; --code:#292b30; --accent:#78aeed; --error:#ff7b86; } }
@@ -177,8 +177,8 @@ impl Preview {
         let resources = Rc::new(RefCell::new(None));
         let context = webkit::WebContext::new();
         if let Some(manager) = context.security_manager() {
-            manager.register_uri_scheme_as_local("blog-editor");
-            manager.register_uri_scheme_as_secure("blog-editor");
+            manager.register_uri_scheme_as_local("cloudstack");
+            manager.register_uri_scheme_as_secure("cloudstack");
         }
         register_resource_scheme(&context, Rc::clone(&resources));
 
@@ -188,7 +188,7 @@ impl Preview {
             webkit::UserContentInjectedFrames::TopFrame,
             webkit::UserScriptInjectionTime::Start,
             SCRIPT_WORLD,
-            &["blog-editor://preview/*"],
+            &["cloudstack://preview/*"],
             &[],
         );
         content_manager.add_script(&script);
@@ -441,7 +441,7 @@ fn register_resource_scheme(
     context: &webkit::WebContext,
     resources: Rc<RefCell<Option<ResourceTarget>>>,
 ) {
-    context.register_uri_scheme("blog-editor", move |request| {
+    context.register_uri_scheme("cloudstack", move |request| {
         if request.http_method().as_deref() != Some("GET") {
             finish_error(
                 request,
@@ -459,7 +459,7 @@ fn register_resource_scheme(
             return;
         };
         if let Some(asset_path) = path.strip_prefix("/app/") {
-            match blog_editor_renderer::static_asset(asset_path) {
+            match cloudstack_renderer::static_asset(asset_path) {
                 Some(asset) => finish_bytes(request, asset.bytes.into_owned(), asset.content_type),
                 None => finish_error(request, gio::IOErrorEnum::NotFound, "找不到内嵌预览资源"),
             }
@@ -609,6 +609,27 @@ fn connect_diagnostics(inner: &Rc<Inner>) {
     });
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavigationDisposition {
+    Allow,
+    External,
+    Block,
+}
+
+fn classify_navigation(uri: &str, user_gesture: bool) -> NavigationDisposition {
+    if (!user_gesture && (uri == "about:blank" || uri.starts_with("cloudstack://preview/current/")))
+        || uri.starts_with("cloudstack://preview/current/#")
+    {
+        NavigationDisposition::Allow
+    } else if user_gesture
+        && (uri.starts_with("https://") || uri.starts_with("http://") || uri.starts_with("mailto:"))
+    {
+        NavigationDisposition::External
+    } else {
+        NavigationDisposition::Block
+    }
+}
+
 fn connect_navigation(inner: &Rc<Inner>) {
     let weak: Weak<Inner> = Rc::downgrade(inner);
     inner
@@ -635,33 +656,28 @@ fn connect_navigation(inner: &Rc<Inner>) {
                 return true;
             };
             let uri = uri.as_str();
-            if !action.is_user_gesture()
-                && (uri == "about:blank" || uri.starts_with("blog-editor://preview/current/"))
-            {
-                return false;
-            }
-            if uri.starts_with("blog-editor://preview/current/#") {
-                return false;
-            }
-
-            decision.ignore();
-            if action.is_user_gesture()
-                && (uri.starts_with("https://")
-                    || uri.starts_with("http://")
-                    || uri.starts_with("mailto:"))
-            {
-                if let Err(error) =
-                    gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>)
-                {
-                    if let Some(inner) = weak.upgrade() {
-                        log::warn!("打开外部链接失败：{error}");
-                        inner.toast("无法使用系统应用打开该链接");
+            match classify_navigation(uri, action.is_user_gesture()) {
+                NavigationDisposition::Allow => false,
+                NavigationDisposition::External => {
+                    decision.ignore();
+                    if let Err(error) =
+                        gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>)
+                    {
+                        if let Some(inner) = weak.upgrade() {
+                            log::warn!("打开外部链接失败：{error}");
+                            inner.toast("无法使用系统应用打开该链接");
+                        }
                     }
+                    true
                 }
-            } else if let Some(inner) = weak.upgrade() {
-                inner.toast("预览已阻止不受支持的链接");
+                NavigationDisposition::Block => {
+                    decision.ignore();
+                    if let Some(inner) = weak.upgrade() {
+                        inner.toast("预览已阻止不受支持的链接");
+                    }
+                    true
+                }
             }
-            true
         });
 }
 
@@ -737,5 +753,25 @@ mod tests {
     fn image_mime_type_is_determined_without_query_or_fragment() {
         assert_eq!(image_content_type("Photo/a.png?x=1"), "image/png");
         assert_eq!(image_content_type("Photo/a.SVG#icon"), "image/svg+xml");
+    }
+
+    #[test]
+    fn navigation_rejects_legacy_and_dangerous_schemes() {
+        assert_eq!(
+            classify_navigation("cloudstack://preview/current/#part", true),
+            NavigationDisposition::Allow
+        );
+        for uri in [
+            "blog-editor://preview/current/#part",
+            "javascript:alert(1)",
+            "data:text/html,unsafe",
+            "file:///etc/passwd",
+        ] {
+            assert_eq!(
+                classify_navigation(uri, true),
+                NavigationDisposition::Block,
+                "{uri} must be blocked"
+            );
+        }
     }
 }

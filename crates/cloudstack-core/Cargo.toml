@@ -1,5 +1,5 @@
 [package]
-name = "blog-editor-core"
+name = "cloudstack-core"
 description = "与 UI 框架无关的 CloudStack 领域逻辑"
 version.workspace = true
 edition.workspace = true

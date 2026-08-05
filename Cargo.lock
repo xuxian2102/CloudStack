@@ -57,50 +57,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blog-editor-core"
-version = "0.2.0"
-dependencies = [
- "chrono",
- "github-slugger",
- "infer",
- "libc",
- "log",
- "percent-encoding",
- "pulldown-cmark",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2 0.10.9",
- "tempfile",
- "thiserror",
- "trash",
- "yaml-edit",
-]
-
-[[package]]
-name = "blog-editor-gtk"
-version = "0.2.0"
-dependencies = [
- "blog-editor-core",
- "blog-editor-renderer",
- "gtk4",
- "libadwaita",
- "log",
- "sourceview5",
- "webkit6",
-]
-
-[[package]]
-name = "blog-editor-renderer"
-version = "0.2.0"
-dependencies = [
- "blog-editor-core",
- "katex-rs",
- "pulldown-cmark",
- "rust-embed",
-]
-
-[[package]]
 name = "bon"
 version = "3.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -206,6 +162,51 @@ dependencies = [
  "iana-time-zone",
  "num-traits",
  "windows-link",
+]
+
+[[package]]
+name = "cloudstack-core"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "github-slugger",
+ "infer",
+ "libc",
+ "log",
+ "percent-encoding",
+ "pulldown-cmark",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "trash",
+ "yaml-edit",
+]
+
+[[package]]
+name = "cloudstack-gtk"
+version = "0.2.0"
+dependencies = [
+ "cloudstack-core",
+ "cloudstack-renderer",
+ "gtk4",
+ "libadwaita",
+ "log",
+ "sourceview5",
+ "tempfile",
+ "webkit6",
+]
+
+[[package]]
+name = "cloudstack-renderer"
+version = "0.2.0"
+dependencies = [
+ "cloudstack-core",
+ "katex-rs",
+ "pulldown-cmark",
+ "rust-embed",
 ]
 
 [[package]]

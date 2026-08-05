@@ -113,6 +113,8 @@ pub struct FieldSpec {
 pub struct ProjectContext {
     pub root: PathBuf,
     pub content_root: PathBuf,
+    /// 当前项目实际使用的配置文件；可能是新名称，也可能是兼容保留的旧名称。
+    pub config_path: PathBuf,
     pub config: ProjectConfig,
 }
 

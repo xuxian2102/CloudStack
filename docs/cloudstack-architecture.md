@@ -6,14 +6,14 @@ Tauri、Node.js 或浏览器前端构建链。
 ## Workspace
 
 ```text
-crates/blog-core/       文件、配置、Frontmatter、草稿、图片与 Git 领域逻辑
-crates/blog-renderer/   Markdown 方言、纯 Rust KaTeX 和内嵌 CSS/字体
-crates/blog-gtk/        GTK4/libadwaita/GtkSourceView/WebKitGTK 应用
+crates/cloudstack-core/       文件、配置、Frontmatter、草稿、图片与 Git 领域逻辑
+crates/cloudstack-renderer/   Markdown 方言、纯 Rust KaTeX 和内嵌 CSS/字体
+crates/cloudstack-gtk/        GTK4/libadwaita/GtkSourceView/WebKitGTK 应用
 fixtures/test-blog/     只读领域测试与 Wayland smoke 项目
 packaging/arch/         Arch VCS 包、desktop entry 和 Wayland 启动器
 ```
 
-依赖始终从 UI 指向领域层：`blog-gtk -> blog-renderer -> blog-core`，同时 GTK 可以直接
+依赖始终从 UI 指向领域层：`cloudstack-gtk -> cloudstack-renderer -> cloudstack-core`，同时 GTK 可以直接
 调用 core 的文章、资产、草稿和 Git 服务。core 与 renderer 不依赖 GTK。
 
 ## 文档状态与写入
@@ -33,7 +33,7 @@ packaging/arch/         Arch VCS 包、desktop entry 和 Wayland 启动器
 后必须同时匹配 `document_epoch` 与 `generation`，因此切换文章和快速输入不会让旧内容
 回跳。
 
-`blog-renderer` 一次遍历 pulldown-cmark 事件，生成静态 HTML + MathML，并保留公式
+`cloudstack-renderer` 一次遍历 pulldown-cmark 事件，生成静态 HTML + MathML，并保留公式
 UTF-8 字节范围。WebView 首次只加载固定外壳，之后通过
 `call_async_javascript_function` 的参数传递 HTML；正文绝不拼接到脚本源码。
 
@@ -47,7 +47,7 @@ UTF-8 字节范围。WebView 首次只加载固定外壳，之后通过
 
 ## 预览资源与导航
 
-`blog-editor:` 自定义协议分为两个命名空间：
+`cloudstack:` 自定义协议分为两个命名空间：
 
 - `/app/` 只提供 renderer 编译时嵌入的 KaTeX CSS 与字体；
 - `/current/` 只读取当前文章相对路径引用的图片。
@@ -70,8 +70,9 @@ Frontmatter 可以缺省。添加时按项目字段配置生成默认值；日�
 ## Git 发布
 
 发布前若文章 dirty，必须先完成同一 revision 保护的保存。状态与发布均在后台执行。
-对话框展示 branch、upstream、ahead/behind、受管和非受管改动；只有内容目录和
-`.blog-editor.json` 会被暂存。未解决冲突、空提交信息或没有受管改动时停止。
+对话框展示 branch、upstream、ahead/behind、受管和非受管改动；只有内容目录和项目
+实际采用的配置文件会被暂存。新项目使用 `.cloudstack.json`，旧项目可继续原地使用
+`.blog-editor.json`。未解决冲突、空提交信息或没有受管改动时停止。
 
 发布按 stage → commit → 可选 push 执行，结果保留已经成功的阶段。push 失败不会伪装
 成 commit 失败，UI 会刷新状态并显示 commit hash 与具体停止阶段。

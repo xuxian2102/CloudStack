@@ -5,7 +5,8 @@ mod window;
 
 use adw::prelude::*;
 
-pub(crate) const APPLICATION_ID: &str = "dev.xuxian.blogeditor";
+pub(crate) const APPLICATION_ID: &str = "dev.xuxian.cloudstack";
+pub(crate) const LEGACY_APPLICATION_ID: &str = "dev.xuxian.blogeditor";
 
 fn main() -> gtk::glib::ExitCode {
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {

@@ -7,4 +7,4 @@ if [ -z "${WAYLAND_DISPLAY:-}" ]; then
 fi
 
 export GDK_BACKEND=wayland
-exec /usr/lib/cloudstack/blog-editor "$@"
+exec /usr/lib/cloudstack/cloudstack "$@"

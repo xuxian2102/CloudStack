@@ -49,20 +49,20 @@ build() {
 package() {
   cd "$srcdir/cloudstack"
 
-  install -Dm755 "$srcdir/target/release/blog-editor" \
-    "$pkgdir/usr/lib/cloudstack/blog-editor"
-  install -Dm755 packaging/arch/blog-editor.sh \
+  install -Dm755 "$srcdir/target/release/cloudstack" \
+    "$pkgdir/usr/lib/cloudstack/cloudstack"
+  install -Dm755 packaging/arch/cloudstack.sh \
     "$pkgdir/usr/bin/cloudstack"
-  install -Dm644 packaging/arch/dev.xuxian.blogeditor.desktop \
-    "$pkgdir/usr/share/applications/dev.xuxian.blogeditor.desktop"
+  install -Dm644 packaging/arch/dev.xuxian.cloudstack.desktop \
+    "$pkgdir/usr/share/applications/dev.xuxian.cloudstack.desktop"
   install -Dm644 packaging/arch/icons/32x32.png \
-    "$pkgdir/usr/share/icons/hicolor/32x32/apps/dev.xuxian.blogeditor.png"
+    "$pkgdir/usr/share/icons/hicolor/32x32/apps/dev.xuxian.cloudstack.png"
   install -Dm644 packaging/arch/icons/128x128.png \
-    "$pkgdir/usr/share/icons/hicolor/128x128/apps/dev.xuxian.blogeditor.png"
+    "$pkgdir/usr/share/icons/hicolor/128x128/apps/dev.xuxian.cloudstack.png"
   install -Dm644 packaging/arch/icons/256x256.png \
-    "$pkgdir/usr/share/icons/hicolor/256x256/apps/dev.xuxian.blogeditor.png"
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/dev.xuxian.cloudstack.png"
   install -Dm644 packaging/arch/icons/512x512.png \
-    "$pkgdir/usr/share/icons/hicolor/512x512/apps/dev.xuxian.blogeditor.png"
+    "$pkgdir/usr/share/icons/hicolor/512x512/apps/dev.xuxian.cloudstack.png"
   install -Dm644 LICENSE \
     "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

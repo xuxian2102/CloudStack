@@ -2,6 +2,15 @@
 
 本项目的重要变更记录在此。版本号遵循 [Semantic Versioning](https://semver.org/)。
 
+## [Unreleased]
+
+### Changed
+
+- Rust workspace、crate、二进制、GTK App ID、预览协议、E2E 与 Arch 安装产物统一使用
+  CloudStack 标识。
+- 新项目配置名改为 `.cloudstack.json`；旧 `.blog-editor.json` 继续原地读写，草稿也可
+  从旧应用数据目录恢复，避免升级打扰现有项目。
+
 ## [0.2.0] - 2026-08-05
 
 ### Added

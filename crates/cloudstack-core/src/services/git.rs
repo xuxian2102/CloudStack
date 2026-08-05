@@ -169,14 +169,23 @@ pub fn status(ctx: &ProjectContext) -> Result<GitStatus, AppError> {
         return Err(map_git_error(&output));
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_porcelain_v2(&text, &ctx.config.content_dir))
+    Ok(parse_porcelain_v2_with_config(
+        &text,
+        &ctx.config.content_dir,
+        active_config_name(ctx),
+    ))
 }
 
-fn is_managed(path: &str, content_dir: &str) -> bool {
+fn active_config_name(ctx: &ProjectContext) -> &str {
+    ctx.config_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(crate::services::project::CONFIG_FILE)
+}
+
+fn is_managed(path: &str, content_dir: &str, config_file: &str) -> bool {
     let content_dir = content_dir.trim_end_matches('/');
-    path == ".blog-editor.json"
-        || path == content_dir
-        || path.starts_with(&format!("{content_dir}/"))
+    path == config_file || path == content_dir || path.starts_with(&format!("{content_dir}/"))
 }
 
 fn classify(xy: &str) -> ChangeKind {
@@ -192,10 +201,16 @@ fn classify(xy: &str) -> ChangeKind {
     }
 }
 
-fn build_change(xy: &str, path: String, old_path: Option<String>, content_dir: &str) -> FileChange {
+fn build_change(
+    xy: &str,
+    path: String,
+    old_path: Option<String>,
+    content_dir: &str,
+    config_file: &str,
+) -> FileChange {
     let staged = xy.chars().next().is_some_and(|x| x != '.');
     let kind = classify(xy);
-    let managed = is_managed(&path, content_dir);
+    let managed = is_managed(&path, content_dir, config_file);
     FileChange {
         path,
         old_path,
@@ -231,6 +246,10 @@ fn parse_rename_fields(rest: &str) -> Option<(&str, &str)> {
 /// 用 -z 而不是默认的换行分隔，是因为文章标题常含中文/特殊字符，
 /// 非 -z 模式下 git 会对路径做 C 风格转义，徒增解析负担。
 pub fn parse_porcelain_v2(text: &str, content_dir: &str) -> GitStatus {
+    parse_porcelain_v2_with_config(text, content_dir, crate::services::project::CONFIG_FILE)
+}
+
+fn parse_porcelain_v2_with_config(text: &str, content_dir: &str, config_file: &str) -> GitStatus {
     let mut branch = None;
     let mut upstream = None;
     let mut ahead = 0u32;
@@ -258,7 +277,13 @@ pub fn parse_porcelain_v2(text: &str, content_dir: &str) -> GitStatus {
             // 其他 header（如 branch.oid），忽略
         } else if let Some(rest) = tok.strip_prefix("1 ") {
             if let Some((xy, path)) = parse_ordinary_fields(rest) {
-                changes.push(build_change(xy, path.to_string(), None, content_dir));
+                changes.push(build_change(
+                    xy,
+                    path.to_string(),
+                    None,
+                    content_dir,
+                    config_file,
+                ));
             }
         } else if let Some(rest) = tok.strip_prefix("2 ") {
             if let Some((xy, path)) = parse_rename_fields(rest) {
@@ -268,6 +293,7 @@ pub fn parse_porcelain_v2(text: &str, content_dir: &str) -> GitStatus {
                     path.to_string(),
                     Some(old_path),
                     content_dir,
+                    config_file,
                 ));
             }
         } else if let Some(rest) = tok.strip_prefix("u ") {
@@ -277,7 +303,7 @@ pub fn parse_porcelain_v2(text: &str, content_dir: &str) -> GitStatus {
                     old_path: None,
                     kind: ChangeKind::Unmerged,
                     staged: false,
-                    managed: is_managed(path, content_dir),
+                    managed: is_managed(path, content_dir, config_file),
                 });
             }
         } else if let Some(path) = tok.strip_prefix("? ") {
@@ -286,7 +312,7 @@ pub fn parse_porcelain_v2(text: &str, content_dir: &str) -> GitStatus {
                 old_path: None,
                 kind: ChangeKind::Untracked,
                 staged: false,
-                managed: is_managed(path, content_dir),
+                managed: is_managed(path, content_dir, config_file),
             });
         }
         // "!" ignored 条目：没有传 --ignored，不会出现
@@ -365,7 +391,7 @@ pub fn publish(ctx: &ProjectContext, message: &str, push: bool) -> Result<Publis
             managed_paths.push(change.path.clone());
         }
         if let Some(old) = &change.old_path {
-            if is_managed(old, &ctx.config.content_dir) {
+            if is_managed(old, &ctx.config.content_dir, active_config_name(ctx)) {
                 managed_paths.push(old.clone());
             }
         }
@@ -502,7 +528,7 @@ mod tests {
             "# branch.head main",
             "1 A. N... 000000 100644 100644 000000 h1 src/content/blog/new.md",
             "? src/content/blog/draft.md",
-            "1 .M N... 100644 100644 100644 h1 h2 .blog-editor.json",
+            "1 .M N... 100644 100644 100644 h1 h2 .cloudstack.json",
             "1 .M N... 100644 100644 100644 h1 h2 README.md",
         ]);
         let status = parse_porcelain_v2(&text, "src/content/blog");
@@ -517,10 +543,27 @@ mod tests {
         assert_eq!(untracked.kind, ChangeKind::Untracked);
         assert!(untracked.managed);
 
-        assert!(by_path(".blog-editor.json").managed);
+        assert!(by_path(".cloudstack.json").managed);
 
         let readme = by_path("README.md");
         assert!(!readme.managed);
+    }
+
+    #[test]
+    fn manages_only_the_projects_active_legacy_config() {
+        let text = porcelain(&[
+            "? .cloudstack.json",
+            "1 .M N... 100644 100644 100644 h1 h2 .blog-editor.json",
+        ]);
+        let status = parse_porcelain_v2_with_config(
+            &text,
+            "src/content/blog",
+            crate::services::project::LEGACY_CONFIG_FILE,
+        );
+        let by_path = |path: &str| status.changes.iter().find(|c| c.path == path).unwrap();
+
+        assert!(!by_path(".cloudstack.json").managed);
+        assert!(by_path(".blog-editor.json").managed);
     }
 
     #[test]
@@ -581,16 +624,17 @@ mod tests {
         run(&root, &["init", "-q", "-b", "main"]);
         // 测试仓库必须自带身份与签名策略，不能依赖开发机 ~/.gitconfig；CI 的
         // 干净 Arch 用户没有全局身份，而 publish() 内部会执行真实 git commit。
-        run(&root, &["config", "user.name", "Blog Editor Test"]);
+        run(&root, &["config", "user.name", "CloudStack Test"]);
         run(
             &root,
-            &["config", "user.email", "blog-editor-test@example.invalid"],
+            &["config", "user.email", "cloudstack-test@example.invalid"],
         );
         run(&root, &["config", "commit.gpgsign", "false"]);
         std::fs::create_dir_all(root.join("src/content/blog")).unwrap();
         let ctx = ProjectContext {
             root: root.clone(),
             content_root: root.join("src/content/blog"),
+            config_path: root.join(".cloudstack.json"),
             config: ProjectConfig {
                 content_dir: "src/content/blog".into(),
                 ..ProjectConfig::default()
@@ -626,13 +670,13 @@ mod tests {
     fn publish_commits_only_managed_files() {
         let (_dir, ctx) = init_repo();
         std::fs::write(ctx.root.join("README.md"), "hello\n").unwrap();
-        std::fs::write(ctx.root.join(".blog-editor.json"), "{\"version\":1}\n").unwrap();
+        std::fs::write(ctx.root.join(".cloudstack.json"), "{\"version\":1}\n").unwrap();
         std::fs::write(ctx.content_root.join("a.md"), "original\n").unwrap();
         commit_all(&ctx.root, "init");
 
         std::fs::write(ctx.root.join("README.md"), "changed outside\n").unwrap();
         std::fs::write(
-            ctx.root.join(".blog-editor.json"),
+            ctx.root.join(".cloudstack.json"),
             "{\"version\":1,\"assets\":{\"mode\":\"colocated\"}}\n",
         )
         .unwrap();
@@ -647,7 +691,7 @@ mod tests {
         assert_eq!(
             result.staged_files,
             vec![
-                ".blog-editor.json".to_string(),
+                ".cloudstack.json".to_string(),
                 "src/content/blog/a.md".to_string(),
             ]
         );
@@ -666,7 +710,7 @@ mod tests {
             .unwrap();
         let s = String::from_utf8_lossy(&status_after.stdout);
         assert!(s.contains("README.md"));
-        assert!(!s.contains(".blog-editor.json"));
+        assert!(!s.contains(".cloudstack.json"));
         assert!(!s.contains("a.md"));
     }
 

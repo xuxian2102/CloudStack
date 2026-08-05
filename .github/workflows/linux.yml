@@ -30,7 +30,7 @@ jobs:
             git rust gtk4 libadwaita gtksourceview5 webkitgtk-6.0 \
             sway dbus desktop-file-utils namcap ttf-dejavu
           setcap -r /usr/bin/sway
-          useradd --create-home --shell /bin/bash blog-editor-ci
+          useradd --create-home --shell /bin/bash cloudstack-ci
 
       - name: Checkout
         uses: actions/checkout@v6
@@ -59,15 +59,16 @@ jobs:
       - name: Check Arch package metadata
         run: |
           bash -n packaging/arch/PKGBUILD
-          sh -n packaging/arch/blog-editor.sh
-          desktop-file-validate packaging/arch/dev.xuxian.blogeditor.desktop
-          runuser --user blog-editor-ci -- \
-            env HOME=/home/blog-editor-ci \
-            BUILDDIR=/home/blog-editor-ci/build \
-            PKGDEST=/home/blog-editor-ci/packages \
-            SRCDEST=/home/blog-editor-ci/sources \
-            SRCPKGDEST=/home/blog-editor-ci/source-packages \
-            LOGDEST=/home/blog-editor-ci/logs \
+          sh -n packaging/arch/cloudstack.sh
+          bash -n test/package-layout.sh
+          desktop-file-validate packaging/arch/dev.xuxian.cloudstack.desktop
+          runuser --user cloudstack-ci -- \
+            env HOME=/home/cloudstack-ci \
+            BUILDDIR=/home/cloudstack-ci/build \
+            PKGDEST=/home/cloudstack-ci/packages \
+            SRCDEST=/home/cloudstack-ci/sources \
+            SRCPKGDEST=/home/cloudstack-ci/source-packages \
+            LOGDEST=/home/cloudstack-ci/logs \
             makepkg --printsrcinfo --dir "$GITHUB_WORKSPACE/packaging/arch" >/dev/null
           namcap_result=$(namcap packaging/arch/PKGBUILD)
           if [[ -n "$namcap_result" ]]; then
@@ -76,14 +77,14 @@ jobs:
           fi
 
       - name: Build Wayland smoke binary
-        run: cargo build -p blog-editor-gtk --features e2e --bin blog-editor --locked
+        run: cargo build -p cloudstack-gtk --features e2e --bin cloudstack --locked
 
       - name: Smoke test native GTK application
         run: |
           # GitHub's container blocks the unprivileged namespaces required by WebKit's
           # Bubblewrap sandbox. This exception is scoped to the isolated CI smoke only.
-          runuser --user blog-editor-ci -- \
+          runuser --user cloudstack-ci -- \
             env -u DISPLAY -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS \
-            HOME=/home/blog-editor-ci PATH="$PATH" \
+            HOME=/home/cloudstack-ci PATH="$PATH" \
             WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 \
-            bash test/native-wayland-smoke.sh target/debug/blog-editor
+            bash test/native-wayland-smoke.sh target/debug/cloudstack

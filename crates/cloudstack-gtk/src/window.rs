@@ -8,9 +8,9 @@ use std::path::Path;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use blog_editor_core::model::{PostDocument, PostSummary, ProjectContext};
-use blog_editor_core::services::assets::PendingAssetManager;
-use blog_editor_core::services::{assets, posts, project};
+use cloudstack_core::model::{PostDocument, PostSummary, ProjectContext};
+use cloudstack_core::services::assets::PendingAssetManager;
+use cloudstack_core::services::{assets, posts, project};
 use gtk::{gdk, gio, glib};
 use sourceview::prelude::*;
 
@@ -70,7 +70,7 @@ pub fn present(application: &adw::Application) {
     connect_close_guard(&widgets, &state);
 
     #[cfg(feature = "e2e")]
-    if let Some(root) = std::env::var_os("BLOG_EDITOR_E2E_PROJECT") {
+    if let Some(root) = std::env::var_os("CLOUDSTACK_E2E_PROJECT") {
         open_project(&widgets, &state, Path::new(&root));
     }
 
@@ -200,7 +200,7 @@ fn build_window(application: &adw::Application) -> Widgets {
         .left_margin(32)
         .right_margin(32)
         .build();
-    buffer.set_text("打开一个博客项目以开始编辑。\n\n项目根目录需要包含 .blog-editor.json。\n");
+    buffer.set_text("打开一个博客项目以开始编辑。\n\n项目根目录需要包含 .cloudstack.json（旧项目也支持 .blog-editor.json）。\n");
 
     let editor_scroll = gtk::ScrolledWindow::builder()
         .hexpand(true)
@@ -615,7 +615,7 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
             }
             set_busy(&widgets, &state, false, "");
             #[cfg(feature = "e2e")]
-            if std::env::var_os("BLOG_EDITOR_E2E_OPEN_FIRST").is_some() {
+            if std::env::var_os("CLOUDSTACK_E2E_OPEN_FIRST").is_some() {
                 let first_post = state.borrow().posts.first().map(|post| post.id.clone());
                 if let Some(post_id) = first_post {
                     load_document(&widgets, &state, &post_id);

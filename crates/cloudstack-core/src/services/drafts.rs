@@ -139,6 +139,7 @@ mod tests {
         fs::write(content_root.join("a.md"), "disk\n").unwrap();
         let ctx = ProjectContext {
             root: content_root.clone(),
+            config_path: content_root.join(".cloudstack.json"),
             content_root,
             config: ProjectConfig::default(),
         };

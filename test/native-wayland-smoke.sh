@@ -9,7 +9,7 @@ for command in sway swaymsg dbus-run-session; do
 done
 
 workspace_root=$(realpath "$(dirname "${BASH_SOURCE[0]}")/..")
-app_binary=${1:-target/debug/blog-editor}
+app_binary=${1:-target/debug/cloudstack}
 if [[ "$app_binary" != /* ]]; then
   app_binary="$workspace_root/$app_binary"
 fi
@@ -18,7 +18,7 @@ if [[ ! -x "$app_binary" ]]; then
   exit 1
 fi
 
-runtime_dir=$(mktemp -d "${TMPDIR:-/tmp}/blog-editor-wayland.XXXXXX")
+runtime_dir=$(mktemp -d "${TMPDIR:-/tmp}/cloudstack-wayland.XXXXXX")
 chmod 700 "$runtime_dir"
 compositor_pid=""
 app_pid=""
@@ -82,9 +82,9 @@ env -u DISPLAY \
   XDG_SESSION_TYPE=wayland GDK_BACKEND=wayland WEBKIT_DISABLE_DMABUF_RENDERER=1 \
   XDG_CACHE_HOME="$runtime_dir/cache" XDG_CONFIG_HOME="$runtime_dir/config" \
   XDG_DATA_HOME="$runtime_dir/data" \
-  BLOG_EDITOR_E2E_PROJECT="$workspace_root/fixtures/test-blog" \
-  BLOG_EDITOR_E2E_OPEN_FIRST=1 \
-  BLOG_EDITOR_E2E_DATA_DIR="$runtime_dir/app-data" \
+  CLOUDSTACK_E2E_PROJECT="$workspace_root/fixtures/test-blog" \
+  CLOUDSTACK_E2E_OPEN_FIRST=1 \
+  CLOUDSTACK_E2E_DATA_DIR="$runtime_dir/app-data" \
   dbus-run-session -- "$app_binary" >"$runtime_dir/app.log" 2>&1 &
 app_pid=$!
 
@@ -93,6 +93,10 @@ for _attempt in {1..300}; do
   kill -0 "$app_pid" 2>/dev/null || break
   tree=$(swaymsg -s "$sway_socket" -r -t get_tree 2>/dev/null || true)
   if printf '%s' "$tree" | grep -Fq 'dev.xuxian.blogeditor'; then
+    echo "检测到旧 GTK App ID" >&2
+    exit 1
+  fi
+  if printf '%s' "$tree" | grep -Fq 'dev.xuxian.cloudstack'; then
     window_seen=1
     break
   fi
@@ -105,7 +109,7 @@ if ((window_seen == 0)); then
 fi
 
 sleep 1
-swaymsg -s "$sway_socket" '[app_id="dev.xuxian.blogeditor"] kill' >/dev/null
+swaymsg -s "$sway_socket" '[app_id="dev.xuxian.cloudstack"] kill' >/dev/null
 for _attempt in {1..100}; do
   kill -0 "$app_pid" 2>/dev/null || break
   sleep 0.05

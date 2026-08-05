@@ -492,6 +492,7 @@ mod tests {
         let content_root = dir.path().canonicalize().unwrap();
         let ctx = ProjectContext {
             root: content_root.clone(),
+            config_path: content_root.join(".cloudstack.json"),
             content_root,
             config: ProjectConfig::default(),
         };
