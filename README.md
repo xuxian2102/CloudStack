@@ -140,11 +140,10 @@ GTK 是唯一持有文件与 Git 权限的 UI。预览文档的原始 HTML会被
 [Markdown 与公式渲染](docs/markdown-rendering.md)，Arch 包说明见
 [packaging/arch/README.md](packaging/arch/README.md)。
 
-## 参与项目
+## 项目反馈
 
-请先阅读 [贡献指南](CONTRIBUTING.md)。Bug 和功能建议可以直接使用仓库的 Issue 表单；提交
-问题时请附上 CloudStack 版本、Arch/Wayland 环境、复现步骤和相关日志。涉及安全问题时，
-请按照 [安全策略](SECURITY.md) 私下报告，不要直接公开利用细节。
+CloudStack 目前暂不开放常规外部贡献。安全问题仍请按照 [安全策略](SECURITY.md) 私下报告，
+不要在公开渠道披露凭据或可直接利用的漏洞细节。
 
 ## 许可证
 
