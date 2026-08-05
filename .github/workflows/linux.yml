@@ -80,7 +80,10 @@ jobs:
 
       - name: Smoke test native GTK application
         run: |
+          # GitHub's container blocks the unprivileged namespaces required by WebKit's
+          # Bubblewrap sandbox. This exception is scoped to the isolated CI smoke only.
           runuser --user blog-editor-ci -- \
             env -u DISPLAY -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS \
             HOME=/home/blog-editor-ci PATH="$PATH" \
+            WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 \
             bash test/native-wayland-smoke.sh target/debug/blog-editor
