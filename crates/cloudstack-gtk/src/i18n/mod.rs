@@ -1,3 +1,4 @@
+mod error;
 mod message;
 
 use std::env;
@@ -6,6 +7,7 @@ use std::sync::OnceLock;
 use fluent_templates::{static_loader, LanguageIdentifier, Loader};
 use unic_langid::langid;
 
+pub(crate) use error::user_facing_error;
 pub(crate) use message::UiMessage;
 
 pub(crate) const FALLBACK_LOCALE: &str = "en-US";

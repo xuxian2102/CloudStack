@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use adw::prelude::*;
+use cloudstack_core::error::AppError;
 use cloudstack_core::model::{PostDocument, PostSummary, ProjectContext, RepositorySnapshot};
 use cloudstack_core::services::assets::PendingAssetManager;
 use cloudstack_core::services::{assets, git, posts, project};
@@ -872,7 +873,7 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
                 Ok(OpenProjectOutcome::NeedsContentRepair { root, content_dir }) => {
                     content_repair = Some((root, content_dir));
                 }
-                Err(error) => show_error(&widgets, &error.to_string()),
+                Err(error) => show_user_facing_error(&widgets, &error),
             }
             set_busy(&widgets, &state, false, "");
             if let Some((root, suggested_content_dir)) = initialization {
@@ -975,7 +976,7 @@ fn repair_and_open_project(
                     toast(&widgets, &i18n::text(UiMessage::ContentDirectoryRepaired));
                     open_project(&widgets, &state, &root);
                 }
-                Err(error) => show_error(&widgets, &error.to_string()),
+                Err(error) => show_user_facing_error(&widgets, &error),
             }
         },
     );
@@ -1079,7 +1080,7 @@ fn initialize_and_open_project(
                     toast(&widgets, &i18n::text(UiMessage::ProjectCreated));
                     open_project(&widgets, &state, &root);
                 }
-                Err(error) => show_error(&widgets, &error.to_string()),
+                Err(error) => show_user_facing_error(&widgets, &error),
             }
         },
     );
@@ -1379,7 +1380,7 @@ fn save_document_then(
                         SaveCompletionOutcome::NotCurrent => {}
                     }
                 }
-                Err(error) => show_error(&widgets, &error.to_string()),
+                Err(error) => show_user_facing_error(&widgets, &error),
             }
             set_busy(&widgets, &state, false, "");
             if continue_after_save {
@@ -1651,6 +1652,14 @@ fn show_error(widgets: &Widgets, message: &str) {
         .priority(adw::ToastPriority::High)
         .build();
     widgets.toast_overlay.add_toast(toast);
+}
+
+fn show_user_facing_error(widgets: &Widgets, error: &AppError) {
+    let mapped = i18n::user_facing_error(error);
+    show_error(widgets, &i18n::text(mapped.message));
+    if let Some(diagnostic) = mapped.diagnostic {
+        log::warn!("用户操作失败：{diagnostic}");
+    }
 }
 
 #[cfg(test)]

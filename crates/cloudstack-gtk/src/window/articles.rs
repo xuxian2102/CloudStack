@@ -95,7 +95,7 @@ fn create_post(
                     display_document(&widgets, &state, document, false);
                     toast(&widgets, &i18n::text(UiMessage::ArticleCreated));
                 }
-                Err(error) => show_error(&widgets, &error.to_string()),
+                Err(error) => super::show_user_facing_error(&widgets, &error),
             }
             set_busy(&widgets, &state, false, "");
             git_panel::refresh(&widgets, &state);
@@ -193,7 +193,7 @@ fn rename_post(
                     display_document(&widgets, &state, renamed, false);
                     toast(&widgets, &i18n::text(UiMessage::ArticleRenamed));
                 }
-                Err(error) => show_error(&widgets, &error.to_string()),
+                Err(error) => super::show_user_facing_error(&widgets, &error),
             }
             set_busy(&widgets, &state, false, "");
             git_panel::refresh(&widgets, &state);

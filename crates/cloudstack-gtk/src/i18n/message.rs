@@ -395,6 +395,20 @@ pub(crate) enum UiMessage {
     PreviewExternalLinkFailedToast,
     PreviewBlockedNavigationToast,
     PreviewLoadFailedToast,
+    ErrorRevisionConflict,
+    ErrorInvalidProject,
+    ErrorMissingProjectConfig,
+    ErrorMissingContentDirectory {
+        path: String,
+    },
+    ErrorProjectConfig,
+    ErrorArticleAlreadyExists {
+        target: String,
+    },
+    ErrorInvalidArticlePath {
+        path: String,
+    },
+    ErrorGeneric,
 }
 
 impl UiMessage {
@@ -687,6 +701,14 @@ impl UiMessage {
             Self::PreviewExternalLinkFailedToast => "preview-external-link-failed-toast",
             Self::PreviewBlockedNavigationToast => "preview-blocked-navigation-toast",
             Self::PreviewLoadFailedToast => "preview-load-failed-toast",
+            Self::ErrorRevisionConflict => "error-revision-conflict",
+            Self::ErrorInvalidProject => "error-invalid-project",
+            Self::ErrorMissingProjectConfig => "error-missing-project-config",
+            Self::ErrorMissingContentDirectory { .. } => "error-missing-content-directory",
+            Self::ErrorProjectConfig => "error-project-config",
+            Self::ErrorArticleAlreadyExists { .. } => "error-article-already-exists",
+            Self::ErrorInvalidArticlePath { .. } => "error-invalid-article-path",
+            Self::ErrorGeneric => "error-generic",
             Self::GitUnmanagedSuffix => "git-unmanaged-suffix",
             Self::GitStagedSuffix => "git-staged-suffix",
         }
@@ -816,6 +838,13 @@ impl UiMessage {
             }
             Self::PreviewMathIssues { count } => {
                 HashMap::from([(Cow::Borrowed("count"), FluentValue::from(*count))])
+            }
+            Self::ErrorMissingContentDirectory { path }
+            | Self::ErrorInvalidArticlePath { path } => {
+                HashMap::from([(Cow::Borrowed("path"), FluentValue::from(path.clone()))])
+            }
+            Self::ErrorArticleAlreadyExists { target } => {
+                HashMap::from([(Cow::Borrowed("target"), FluentValue::from(target.clone()))])
             }
             Self::GitChangeLine {
                 marker,
@@ -1218,5 +1247,19 @@ pub(crate) fn message_samples() -> Vec<UiMessage> {
         UiMessage::PreviewExternalLinkFailedToast,
         UiMessage::PreviewBlockedNavigationToast,
         UiMessage::PreviewLoadFailedToast,
+        UiMessage::ErrorRevisionConflict,
+        UiMessage::ErrorInvalidProject,
+        UiMessage::ErrorMissingProjectConfig,
+        UiMessage::ErrorMissingContentDirectory {
+            path: "notes".to_owned(),
+        },
+        UiMessage::ErrorProjectConfig,
+        UiMessage::ErrorArticleAlreadyExists {
+            target: "notes/example.md".to_owned(),
+        },
+        UiMessage::ErrorInvalidArticlePath {
+            path: "../outside.md".to_owned(),
+        },
+        UiMessage::ErrorGeneric,
     ]
 }
