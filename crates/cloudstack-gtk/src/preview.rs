@@ -10,6 +10,7 @@ use cloudstack_renderer::{MarkdownRenderer, MathIssue, RenderedDocument};
 use gtk::{gio, glib};
 use webkit::prelude::*;
 
+use crate::i18n::{self, UiMessage};
 use crate::tasks;
 
 const SCRIPT_WORLD: &str = "cloudstack-preview";
@@ -71,7 +72,7 @@ const PREVIEW_SCRIPT: &str = r#"
 "#;
 
 const PREVIEW_SHELL: &str = r#"<!doctype html>
-<html lang="zh-CN">
+<html lang="__CLOUDSTACK_LOCALE__">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -99,8 +100,23 @@ table { border-collapse:collapse; width:100%; } th,td { border:1px solid var(--b
 .preview-placeholder { color:var(--muted); text-align:center; margin-top:24vh; }
 </style>
 </head>
-<body><main id="preview-root"><p class="preview-placeholder">选择文章后显示实时预览</p></main></body>
+<body><main id="preview-root"><p class="preview-placeholder">__CLOUDSTACK_PREVIEW_PLACEHOLDER__</p></main></body>
 </html>"#;
+
+fn preview_shell() -> String {
+    let locale = i18n::current_locale().to_string();
+    let placeholder = i18n::text(UiMessage::PreviewSelectArticlePlaceholder);
+    PREVIEW_SHELL
+        .replace("__CLOUDSTACK_LOCALE__", &locale)
+        .replace("__CLOUDSTACK_PREVIEW_PLACEHOLDER__", &placeholder)
+}
+
+fn preview_placeholder_html() -> String {
+    format!(
+        r#"<p class="preview-placeholder">{}</p>"#,
+        i18n::text(UiMessage::PreviewSelectArticlePlaceholder)
+    )
+}
 
 #[derive(Clone)]
 struct ResourceTarget {
@@ -220,7 +236,7 @@ impl Preview {
 
         let diagnostic_button = gtk::Button::builder()
             .icon_name("dialog-warning-symbolic")
-            .tooltip_text("跳到第一条公式错误")
+            .tooltip_text(i18n::text(UiMessage::PreviewDiagnosticTooltip))
             .visible(false)
             .css_classes(["flat"])
             .build();
@@ -249,9 +265,8 @@ impl Preview {
         connect_diagnostics(&inner);
         connect_navigation(&inner);
         connect_load_lifecycle(&inner);
-        inner
-            .webview
-            .load_html(PREVIEW_SHELL, Some(PREVIEW_BASE_URI));
+        let shell = preview_shell();
+        inner.webview.load_html(&shell, Some(PREVIEW_BASE_URI));
 
         Self { inner }
     }
@@ -289,8 +304,7 @@ impl Preview {
         self.inner.resources.borrow_mut().take();
         self.inner.last_applied.borrow_mut().take();
         self.inner.set_issues(Vec::new());
-        self.inner
-            .update_html("<p class=\"preview-placeholder\">选择文章后显示实时预览</p>".to_string());
+        self.inner.update_html(preview_placeholder_html());
     }
 
     pub fn schedule(&self, source: String, immediate: bool) {
@@ -350,7 +364,7 @@ impl Inner {
             match rendered {
                 Ok(document) => inner.finish_request(request, document),
                 Err(_) => {
-                    inner.toast("Markdown 后台渲染异常终止");
+                    inner.toast(&i18n::text(UiMessage::PreviewRenderFailedToast));
                     inner.finish_without_result();
                 }
             }
@@ -391,7 +405,9 @@ impl Inner {
             move |result| {
                 if let Err(error) = result {
                     log::warn!("更新实时预览失败：{error}");
-                    overlay.add_toast(adw::Toast::new("实时预览更新失败"));
+                    overlay.add_toast(adw::Toast::new(&i18n::text(
+                        UiMessage::PreviewUpdateFailedToast,
+                    )));
                 }
             },
         );
@@ -416,7 +432,7 @@ impl Inner {
         *self.issues.borrow_mut() = issues;
         self.diagnostic_button.set_visible(count > 0);
         self.diagnostic_button
-            .set_label(&format!("公式错误 {count}"));
+            .set_label(&i18n::text(UiMessage::PreviewMathIssues { count }));
     }
 
     fn toast(&self, message: &str) {
@@ -592,7 +608,7 @@ fn connect_diagnostics(inner: &Rc<Inner>) {
             || !source.is_char_boundary(issue.span.start)
             || !source.is_char_boundary(issue.span.end)
         {
-            inner.toast("公式错误位置已经过期，请等待预览刷新");
+            inner.toast(&i18n::text(UiMessage::PreviewDiagnosticsExpiredToast));
             return;
         }
         let start_offset =
@@ -666,7 +682,7 @@ fn connect_navigation(inner: &Rc<Inner>) {
                     {
                         if let Some(inner) = weak.upgrade() {
                             log::warn!("打开外部链接失败：{error}");
-                            inner.toast("无法使用系统应用打开该链接");
+                            inner.toast(&i18n::text(UiMessage::PreviewExternalLinkFailedToast));
                         }
                     }
                     true
@@ -674,7 +690,7 @@ fn connect_navigation(inner: &Rc<Inner>) {
                 NavigationDisposition::Block => {
                     decision.ignore();
                     if let Some(inner) = weak.upgrade() {
-                        inner.toast("预览已阻止不受支持的链接");
+                        inner.toast(&i18n::text(UiMessage::PreviewBlockedNavigationToast));
                     }
                     true
                 }
@@ -707,7 +723,7 @@ fn connect_load_lifecycle(inner: &Rc<Inner>) {
         };
         inner.shell_ready.set(false);
         log::warn!("实时预览页面加载失败：uri={uri} error={error}");
-        inner.toast("实时预览页面加载失败，编辑和保存仍可继续");
+        inner.toast(&i18n::text(UiMessage::PreviewLoadFailedToast));
         false
     });
 }
@@ -722,6 +738,14 @@ mod tests {
             generation,
             source: generation.to_string(),
         }
+    }
+
+    #[test]
+    fn preview_shell_localizes_placeholder_and_language_tag() {
+        let shell = preview_shell();
+        assert!(!shell.contains("__CLOUDSTACK_LOCALE__"));
+        assert!(!shell.contains("__CLOUDSTACK_PREVIEW_PLACEHOLDER__"));
+        assert!(shell.contains("preview-root"));
     }
 
     #[test]

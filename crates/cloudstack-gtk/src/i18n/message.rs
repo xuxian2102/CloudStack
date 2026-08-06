@@ -372,6 +372,29 @@ pub(crate) enum UiMessage {
     GitUntrackHeading,
     GitUntrackBody,
     GitUntrackAction,
+    SearchFindPlaceholder,
+    SearchPreviousTooltip,
+    SearchNextTooltip,
+    SearchCaseSensitiveTooltip,
+    SearchToggleReplaceTooltip,
+    SearchCloseTooltip,
+    SearchReplacePlaceholder,
+    SearchReplace,
+    SearchReplaceTooltip,
+    SearchReplaceAll,
+    SearchReplaceAllTooltip,
+    SearchNoMatches,
+    PreviewDiagnosticTooltip,
+    PreviewSelectArticlePlaceholder,
+    PreviewMathIssues {
+        count: usize,
+    },
+    PreviewRenderFailedToast,
+    PreviewUpdateFailedToast,
+    PreviewDiagnosticsExpiredToast,
+    PreviewExternalLinkFailedToast,
+    PreviewBlockedNavigationToast,
+    PreviewLoadFailedToast,
 }
 
 impl UiMessage {
@@ -643,6 +666,27 @@ impl UiMessage {
             Self::GitUntrackHeading => "git-untrack-heading",
             Self::GitUntrackBody => "git-untrack-body",
             Self::GitUntrackAction => "git-untrack-action",
+            Self::SearchFindPlaceholder => "search-find-placeholder",
+            Self::SearchPreviousTooltip => "search-previous-tooltip",
+            Self::SearchNextTooltip => "search-next-tooltip",
+            Self::SearchCaseSensitiveTooltip => "search-case-sensitive-tooltip",
+            Self::SearchToggleReplaceTooltip => "search-toggle-replace-tooltip",
+            Self::SearchCloseTooltip => "search-close-tooltip",
+            Self::SearchReplacePlaceholder => "search-replace-placeholder",
+            Self::SearchReplace => "search-replace",
+            Self::SearchReplaceTooltip => "search-replace-tooltip",
+            Self::SearchReplaceAll => "search-replace-all",
+            Self::SearchReplaceAllTooltip => "search-replace-all-tooltip",
+            Self::SearchNoMatches => "search-no-matches",
+            Self::PreviewDiagnosticTooltip => "preview-diagnostic-tooltip",
+            Self::PreviewSelectArticlePlaceholder => "preview-select-article-placeholder",
+            Self::PreviewMathIssues { .. } => "preview-math-issues",
+            Self::PreviewRenderFailedToast => "preview-render-failed-toast",
+            Self::PreviewUpdateFailedToast => "preview-update-failed-toast",
+            Self::PreviewDiagnosticsExpiredToast => "preview-diagnostics-expired-toast",
+            Self::PreviewExternalLinkFailedToast => "preview-external-link-failed-toast",
+            Self::PreviewBlockedNavigationToast => "preview-blocked-navigation-toast",
+            Self::PreviewLoadFailedToast => "preview-load-failed-toast",
             Self::GitUnmanagedSuffix => "git-unmanaged-suffix",
             Self::GitStagedSuffix => "git-staged-suffix",
         }
@@ -769,6 +813,9 @@ impl UiMessage {
             }
             Self::GitStopStage { stage } => {
                 HashMap::from([(Cow::Borrowed("stage"), FluentValue::from(stage.clone()))])
+            }
+            Self::PreviewMathIssues { count } => {
+                HashMap::from([(Cow::Borrowed("count"), FluentValue::from(*count))])
             }
             Self::GitChangeLine {
                 marker,
@@ -1150,5 +1197,26 @@ pub(crate) fn message_samples() -> Vec<UiMessage> {
         UiMessage::GitUntrackAction,
         UiMessage::GitUnmanagedSuffix,
         UiMessage::GitStagedSuffix,
+        UiMessage::SearchFindPlaceholder,
+        UiMessage::SearchPreviousTooltip,
+        UiMessage::SearchNextTooltip,
+        UiMessage::SearchCaseSensitiveTooltip,
+        UiMessage::SearchToggleReplaceTooltip,
+        UiMessage::SearchCloseTooltip,
+        UiMessage::SearchReplacePlaceholder,
+        UiMessage::SearchReplace,
+        UiMessage::SearchReplaceTooltip,
+        UiMessage::SearchReplaceAll,
+        UiMessage::SearchReplaceAllTooltip,
+        UiMessage::SearchNoMatches,
+        UiMessage::PreviewDiagnosticTooltip,
+        UiMessage::PreviewSelectArticlePlaceholder,
+        UiMessage::PreviewMathIssues { count: 2 },
+        UiMessage::PreviewRenderFailedToast,
+        UiMessage::PreviewUpdateFailedToast,
+        UiMessage::PreviewDiagnosticsExpiredToast,
+        UiMessage::PreviewExternalLinkFailedToast,
+        UiMessage::PreviewBlockedNavigationToast,
+        UiMessage::PreviewLoadFailedToast,
     ]
 }

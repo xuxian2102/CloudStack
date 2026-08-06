@@ -1,6 +1,8 @@
 use gtk::{gdk, glib};
 use sourceview::prelude::*;
 
+use crate::i18n::{self, UiMessage};
+
 #[derive(Clone)]
 pub struct SearchPanel {
     root: gtk::Revealer,
@@ -24,7 +26,7 @@ impl SearchPanel {
         context.set_highlight(true);
 
         let query = gtk::SearchEntry::builder()
-            .placeholder_text("查找")
+            .placeholder_text(i18n::text(UiMessage::SearchFindPlaceholder))
             .hexpand(true)
             .max_width_chars(60)
             .build();
@@ -33,17 +35,26 @@ impl SearchPanel {
             .xalign(0.5)
             .css_classes(["dim-label", "numeric"])
             .build();
-        let previous = icon_button("go-up-symbolic", "上一个匹配项 (Shift+F3)");
-        let next = icon_button("go-down-symbolic", "下一个匹配项 (F3)");
+        let previous = icon_button(
+            "go-up-symbolic",
+            &i18n::text(UiMessage::SearchPreviousTooltip),
+        );
+        let next = icon_button(
+            "go-down-symbolic",
+            &i18n::text(UiMessage::SearchNextTooltip),
+        );
         let case_sensitive = gtk::ToggleButton::builder()
             .label("Aa")
-            .tooltip_text("区分大小写")
+            .tooltip_text(i18n::text(UiMessage::SearchCaseSensitiveTooltip))
             .build();
         let replace_toggle = gtk::ToggleButton::builder()
             .icon_name("edit-find-replace-symbolic")
-            .tooltip_text("显示替换栏")
+            .tooltip_text(i18n::text(UiMessage::SearchToggleReplaceTooltip))
             .build();
-        let close = icon_button("window-close-symbolic", "关闭查找 (Escape)");
+        let close = icon_button(
+            "window-close-symbolic",
+            &i18n::text(UiMessage::SearchCloseTooltip),
+        );
 
         let find_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         find_row.set_margin_top(6);
@@ -59,13 +70,13 @@ impl SearchPanel {
         find_row.append(&close);
 
         let replacement = gtk::Entry::builder()
-            .placeholder_text("替换为")
+            .placeholder_text(i18n::text(UiMessage::SearchReplacePlaceholder))
             .hexpand(true)
             .build();
-        let replace_one = gtk::Button::with_label("替换");
-        replace_one.set_tooltip_text(Some("替换当前匹配项"));
-        let replace_all = gtk::Button::with_label("全部替换");
-        replace_all.set_tooltip_text(Some("替换文档中的所有匹配项"));
+        let replace_one = gtk::Button::with_label(&i18n::text(UiMessage::SearchReplace));
+        replace_one.set_tooltip_text(Some(&i18n::text(UiMessage::SearchReplaceTooltip)));
+        let replace_all = gtk::Button::with_label(&i18n::text(UiMessage::SearchReplaceAll));
+        replace_all.set_tooltip_text(Some(&i18n::text(UiMessage::SearchReplaceAllTooltip)));
         let replace_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         replace_row.set_margin_bottom(6);
         replace_row.set_margin_start(8);
@@ -317,7 +328,7 @@ fn update_count(
     } else if total < 0 {
         label.set_label("…");
     } else if total == 0 {
-        label.set_label("无匹配");
+        label.set_label(&i18n::text(UiMessage::SearchNoMatches));
     } else {
         let position = buffer
             .selection_bounds()
