@@ -9,7 +9,7 @@
 全部 5 项已修复（分四轮实施 + 一轮针对 rename journal 恢复状态机的修复，`main` 在 v0.2.4 之后的提交里）。
 
 - [x] **Git 状态刷新缺少 generation/token 校验，存在乱序覆盖窗口**（第 1 轮）
-  `EditorState` 加 `git_refresh_generation: u64`；`git_panel::refresh()` 完成回调改用新增的纯函数 `app::should_apply_git_refresh`（`crates/cloudstack-gtk/src/app/git_refresh.rs`）同时校验 root 与 generation。
+  `EditorState` 加 `git_refresh_generation: u64`；`git_panel::refresh()` 完成回调改用新增的纯函数 `should_apply_git_refresh` 同时校验 root 与 generation。这个函数当时新建在 `crates/cloudstack-gtk/src/app/git_refresh.rs`，后来随"新增 `cloudstack-application` crate"一节的第 1 轮原样迁移到了 `crates/cloudstack-application/src/git_refresh.rs`，现在通过 `cloudstack_application::should_apply_git_refresh` 引用。
 
 - [x] **Git porcelain v2 解析：冲突路径（`u` 记录）遇空格截断** + **有损 UTF-8 转换回传 git 当 pathspec**（第 2 轮，合并成一次改动，同一处代码）
   `parse_porcelain_v2` 改为 `(&[u8], &str) -> Result<GitStatus, AppError>`，全程按字节切分，只在放进 `FileChange`/分支名时严格 `str::from_utf8`，失败即拒绝（新增 `git::UNSUPPORTED_PATH_ENCODING_ERROR`，GTK 侧有专门的 `UiMessage::GitErrorUnsupportedPathEncoding` 提示，不止是日志）。`u` 记录改成固定字段数解析。`status()` 不再自己 `from_utf8_lossy`。范围按讨论结果收敛为"1+"：没有做 `FileChange`/`ManagedScope` 全链路 `OsString` 化（那是明显更大的一次改动，评估后判断当前不值得，见下方"未来再考虑"）。
@@ -50,13 +50,13 @@
 
 ## 新增 `cloudstack-application` crate（用户提出，2026-08-07，P1 收尾后的下一步）
 
-**状态：第 1～3 项已完成（分三轮实施，测试数量全程守恒 252，`cargo tree -p cloudstack-application --edges normal` 确认零 GTK/GLib/GIO/Adwaita/WebKit 依赖）。第 4～8 项尚未开始。**
+**状态：第 1～4 项已完成（分四轮实施，测试数量全程守恒 253，`cargo tree -p cloudstack-application --edges normal` 确认零 GTK/GLib/GIO/Adwaita/WebKit 依赖，且不依赖 `cloudstack-renderer`）。第 5～8 项尚未开始。**
 
 ```text
 第 1 轮：新建 crate + 迁移 save/settings/git_refresh          [x] 21 个测试
 第 2 轮：Git 主操作决策迁移（PrimaryGitAction/EffectiveGitAction） [x]  8 个测试
 第 3 轮：ControlModel → WorkspaceCapabilities                [x]  7 个测试
-第 4 项：PreviewCoordinator                                  [ ] 未开始
+第 4 轮：PreviewCoordinator（含"撤销覆盖预览"正确性修复）      [x]  4 个测试
 第 5 项：Recent 状态协调 / LatestWriteCoordinator             [ ] 未开始
 第 6 项：PublishPlan                                          [ ] 未开始
 第 7 项：DraftCoordinator                                     [ ] 未开始
@@ -65,13 +65,11 @@
 
 依赖方向 `cloudstack-gtk → cloudstack-application → cloudstack-core`（外加 `cloudstack-gtk → cloudstack-renderer → cloudstack-core`）已经是编译期边界，不再只是"目录上的分层"。
 
-P1 基本结束后、在继续加搜索/多标签页等功能前，应该先把应用逻辑从 `cloudstack-gtk` crate 中抽出来，后续维护成本会低很多。
-
-已经迈出的第一步：`crates/cloudstack-gtk/src/app/{save,settings,git_refresh}.rs` 都明确不依赖 GTK，但它们仍然属于 `cloudstack-gtk` crate，目前只是"目录上的分层"，还没有形成编译期边界。
+P1 基本结束后、在继续加搜索/多标签页等功能前，应该先把应用逻辑从 `cloudstack-gtk` crate 中抽出来，后续维护成本会低很多。以下是这个决定当时的背景（历史记录，不是现状描述）：在第 1 轮之前，`crates/cloudstack-gtk/src/app/{save,settings,git_refresh}.rs` 已经明确不依赖 GTK，但仍然属于 `cloudstack-gtk` crate，只是"目录上的分层"，还没有形成编译期边界——这正是发起这轮拆分的理由。
 
 ### 目标依赖方向
 
-当前 workspace 只有 `cloudstack-core`、`cloudstack-renderer`、`cloudstack-gtk`。建议新增 `crates/cloudstack-application`：
+`crates/cloudstack-application` 已经建好（第 1 轮），当前 workspace 是 `cloudstack-application`、`cloudstack-core`、`cloudstack-gtk`、`cloudstack-renderer` 四个 crate：
 
 ```text
 cloudstack-gtk ───────→ cloudstack-application ───────→ cloudstack-core
@@ -94,7 +92,8 @@ cloudstack-gtk ───────→ cloudstack-application ─────�
 
 3. [x] **整体控件状态模型**：`ControlModel`/`controls_for(&EditorState)` 已迁入 `application::controls::{WorkspaceCapabilitiesInput, WorkspaceCapabilities, capabilities_for}`，`render_controls(&Widgets, &WorkspaceCapabilities)` 留在 GTK。字段名沿用原 `ControlModel` 的命名（`open_enabled`/`home_enabled`/... 而不是这里最初示意的 `can_open_project`/`can_close_project`），减少无谓改名；`git_dirty`/`stable` 两处关键语义原样保留（`git_dirty` 只反映当前文章，不与其他未保存文章混淆；`stable` 只挡导航类操作，当前文档的编辑/保存/frontmatter/文章列表仍只看 `busy`）。`sync_controls()` 把 `EditorState` 的 `RefCell` 借用收窄到只覆盖读取快照那一步，`render_controls()` 触发的 GTK setter 调用不再持有借用。
 
-4. **预览任务状态机**：`preview.rs` 里的 `RenderRequest`/`QueueState`/`QueueState::enqueue()`/`QueueState::finish()`/`should_apply()`/`debounce_duration()` 都是纯 Rust，实现"同时只运行一个 render、pending 只保留最新请求、epoch/generation 不匹配时丢弃旧结果、按文档大小选 debounce 时间"。迁成 `application::preview::{PreviewCoordinator, PreviewRequest, PreviewTicket, PreviewAction}`。GTK 继续保留 `glib::timeout_add_local_once`、`gio::spawn_blocking`、WebKit shell、JS 调用、URI scheme、编辑器与预览滚动同步——application 决定"什么时候启动哪个任务、哪个结果可以应用"，GTK 决定"怎样执行任务和怎样展示"。
+4. [x] **预览任务状态机**：`preview.rs` 里原来的 `RenderRequest`/`QueueState`/`should_apply()`/`debounce_duration()` 已迁入并重构成 `cloudstack-application/src/preview.rs` 的 `PreviewCoordinator`（`PreviewTicket`/`PreviewRequest`/`PreviewAction`/`PreviewCompletion` + `set_document`/`clear`/`schedule`/`debounce_elapsed`/`complete_render`）。GTK 侧 `Inner` 只保留 `timeout: RefCell<Option<glib::SourceId>>`（实际 GLib 定时器，coordinator 不持有）和 `coordinator: RefCell<PreviewCoordinator>`，新增 `dispatch_action`/`cancel_timeout` 两个小 adapter；WebKit shell、JS 调用、URI scheme、编辑器与预览滚动同步等继续留在 GTK。`cloudstack-application` 不依赖 `cloudstack-renderer`——coordinator 只协调"什么时候该渲染哪段文本"，真正的 Markdown → HTML 转换仍由 GTK 持有的 `MarkdownRenderer` 完成。
+   **顺手修的正确性问题**：原来的 `schedule()` 会在"新正文等于上次已应用内容"时直接提前返回，不取消尚未开始的 debounce/不推进 generation。场景：预览显示 A → 用户输入 B（进入 debounce 或已经在后台渲染）→ 用户快速撤销回 A → 因为 A 等于 last_applied 就什么都不做 → B 没被取消或失效 → B 最终完成后覆盖掉本该保持是 A 的预览。修复后 `schedule()` 无论是否需要重新渲染，都先无条件清空 `pending`/`debounced` 并推进 `generation`，让任何还在飞行或排队的旧请求（不管是不是恰好等于新内容）在完成时因为 generation 不匹配而被拒绝应用。新增回归测试 `returning_to_last_applied_source_invalidates_newer_render`，覆盖"B 还在 debounce"和"B 已经在后台渲染"两种子场景。
 
 5. **Recent 状态协调**：`window/recent.rs` 里不止 `choose_document_to_restore()` 能迁——恢复上次文章的条件判断、查找真正最近打开的项目、`LastDocumentWrite` 的 single-writer/latest-value coalescing 都能迁。当前"最后文章写入"协调器由 `thread_local!` + `in_flight` + `pending` 组成，本质上跟 `SettingsWriter` 是同一种应用状态机（`LatestWriteCoordinator<T>` 或专用的 `LastDocumentWriter { in_flight, pending }`）。不建议为了复用强行做高度泛型，两个明确的小状态机通常更容易读。
 

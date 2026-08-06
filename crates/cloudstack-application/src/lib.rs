@@ -7,10 +7,14 @@
 pub mod controls;
 pub mod git;
 pub mod git_refresh;
+pub mod preview;
 pub mod save;
 pub mod settings;
 
 pub use controls::{capabilities_for, WorkspaceCapabilities, WorkspaceCapabilitiesInput};
 pub use git_refresh::should_apply_git_refresh;
+pub use preview::{
+    PreviewAction, PreviewCompletion, PreviewCoordinator, PreviewRequest, PreviewTicket,
+};
 pub use save::{apply_successful_save, classify_save_completion, SaveCompletionOutcome};
 pub use settings::{SettingsWriter, SettingsWriterAction, VersionedSettings};

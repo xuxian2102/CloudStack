@@ -1,9 +1,9 @@
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
-use std::time::Duration;
 
 use adw::prelude::*;
+use cloudstack_application::preview::{PreviewAction, PreviewCoordinator, PreviewRequest};
 use cloudstack_core::model::ProjectContext;
 use cloudstack_core::services::assets;
 use cloudstack_renderer::{MarkdownRenderer, MathIssue, RenderedDocument};
@@ -124,48 +124,11 @@ struct ResourceTarget {
     post_id: String,
 }
 
-#[derive(Clone)]
-struct RenderRequest {
-    epoch: u64,
-    generation: u64,
-    source: String,
-}
-
-#[derive(Default)]
-struct QueueState {
-    active: bool,
-    pending: Option<RenderRequest>,
-}
-
-impl QueueState {
-    fn enqueue(&mut self, request: RenderRequest) -> Option<RenderRequest> {
-        self.pending = Some(request);
-        if self.active {
-            None
-        } else {
-            self.active = true;
-            self.pending.take()
-        }
-    }
-
-    fn finish(&mut self) -> Option<RenderRequest> {
-        if let Some(next) = self.pending.take() {
-            Some(next)
-        } else {
-            self.active = false;
-            None
-        }
-    }
-}
-
 struct Inner {
     webview: webkit::WebView,
     renderer: Arc<MarkdownRenderer>,
     timeout: RefCell<Option<glib::SourceId>>,
-    generation: Cell<u64>,
-    epoch: Cell<u64>,
-    queue: RefCell<QueueState>,
-    last_applied: RefCell<Option<(u64, String)>>,
+    coordinator: RefCell<PreviewCoordinator>,
     shell_ready: Cell<bool>,
     pending_html: RefCell<Option<String>>,
     resources: Rc<RefCell<Option<ResourceTarget>>>,
@@ -244,10 +207,7 @@ impl Preview {
             webview,
             renderer: Arc::new(MarkdownRenderer::default()),
             timeout: RefCell::new(None),
-            generation: Cell::new(0),
-            epoch: Cell::new(0),
-            queue: RefCell::new(QueueState::default()),
-            last_applied: RefCell::new(None),
+            coordinator: RefCell::new(PreviewCoordinator::default()),
             shell_ready: Cell::new(false),
             pending_html: RefCell::new(None),
             resources,
@@ -286,73 +246,67 @@ impl Preview {
         epoch: u64,
         source: String,
     ) {
-        self.inner.epoch.set(epoch);
         *self.inner.resources.borrow_mut() = Some(ResourceTarget { context, post_id });
-        self.inner.last_applied.borrow_mut().take();
-        self.schedule(source, true);
+        Inner::cancel_timeout(&self.inner);
+        let action = self
+            .inner
+            .coordinator
+            .borrow_mut()
+            .set_document(epoch, source);
+        Inner::dispatch_action(&self.inner, action);
     }
 
     pub fn clear(&self, epoch: u64) {
-        self.inner.epoch.set(epoch);
-        self.inner
-            .generation
-            .set(self.inner.generation.get().wrapping_add(1));
-        if let Some(timeout) = self.inner.timeout.borrow_mut().take() {
-            timeout.remove();
-        }
-        self.inner.queue.borrow_mut().pending = None;
+        Inner::cancel_timeout(&self.inner);
+        self.inner.coordinator.borrow_mut().clear(epoch);
         self.inner.resources.borrow_mut().take();
-        self.inner.last_applied.borrow_mut().take();
         self.inner.set_issues(Vec::new());
         self.inner.update_html(preview_placeholder_html());
     }
 
     pub fn schedule(&self, source: String, immediate: bool) {
-        if self
+        Inner::cancel_timeout(&self.inner);
+        let action = self
             .inner
-            .last_applied
-            .borrow()
-            .as_ref()
-            .is_some_and(|(epoch, applied)| *epoch == self.inner.epoch.get() && applied == &source)
-        {
-            return;
-        }
-        if let Some(timeout) = self.inner.timeout.borrow_mut().take() {
-            timeout.remove();
-        }
-        let generation = self.inner.generation.get().wrapping_add(1);
-        self.inner.generation.set(generation);
-        let request = RenderRequest {
-            epoch: self.inner.epoch.get(),
-            generation,
-            source,
-        };
-        if immediate {
-            Inner::enqueue(&self.inner, request);
-            return;
-        }
-
-        let delay = debounce_duration(request.source.len());
-        let weak = Rc::downgrade(&self.inner);
-        let source = glib::timeout_add_local_once(delay, move || {
-            if let Some(inner) = weak.upgrade() {
-                inner.timeout.borrow_mut().take();
-                Inner::enqueue(&inner, request);
-            }
-        });
-        *self.inner.timeout.borrow_mut() = Some(source);
+            .coordinator
+            .borrow_mut()
+            .schedule(source, immediate);
+        Inner::dispatch_action(&self.inner, action);
     }
 }
 
 impl Inner {
-    fn enqueue(this: &Rc<Self>, request: RenderRequest) {
-        let next = this.queue.borrow_mut().enqueue(request);
-        if let Some(next) = next {
-            Self::start(this, next);
+    /// GTK 侧真正的定时器只在这里取消——这是平台副作用，coordinator 自己不
+    /// 持有 `glib::SourceId`，所以每次要把新 action 交给它处理之前，调用方
+    /// 都要先在这里清掉上一个还没触发的 debounce timer。
+    fn cancel_timeout(this: &Rc<Self>) {
+        if let Some(timeout) = this.timeout.borrow_mut().take() {
+            timeout.remove();
         }
     }
 
-    fn start(this: &Rc<Self>, request: RenderRequest) {
+    fn dispatch_action(this: &Rc<Self>, action: PreviewAction) {
+        match action {
+            PreviewAction::None => {}
+            PreviewAction::Start(request) => Self::start(this, request),
+            PreviewAction::Debounce { request, delay } => {
+                let weak = Rc::downgrade(this);
+                let source_id = glib::timeout_add_local_once(delay, move || {
+                    let Some(inner) = weak.upgrade() else {
+                        return;
+                    };
+                    inner.timeout.borrow_mut().take();
+                    let next = inner.coordinator.borrow_mut().debounce_elapsed(request);
+                    if let Some(next) = next {
+                        Self::start(&inner, next);
+                    }
+                });
+                *this.timeout.borrow_mut() = Some(source_id);
+            }
+        }
+    }
+
+    fn start(this: &Rc<Self>, request: PreviewRequest) {
         let renderer = Arc::clone(&this.renderer);
         let source = request.source.clone();
         let weak = Rc::downgrade(this);
@@ -362,27 +316,35 @@ impl Inner {
                 return;
             };
             match rendered {
-                Ok(document) => inner.finish_request(request, document),
+                Ok(document) => inner.finish_request(request, true, Some(document)),
                 Err(_) => {
                     inner.toast(&i18n::text(UiMessage::PreviewRenderFailedToast));
-                    inner.finish_without_result();
+                    inner.finish_request(request, false, None);
                 }
             }
         });
     }
 
-    fn finish_request(self: &Rc<Self>, request: RenderRequest, document: RenderedDocument) {
-        if should_apply(&request, self.epoch.get(), self.generation.get()) {
-            self.update_html(document.body_html);
-            self.set_issues(document.issues);
-            *self.last_applied.borrow_mut() = Some((request.epoch, request.source));
+    /// 无论渲染成功还是失败都要走这里：让 coordinator 判断这次结果是否还
+    /// 有资格应用（票据是否还是当前 epoch/generation），并按它的指示启动
+    /// 排队里最新的下一个请求。
+    fn finish_request(
+        self: &Rc<Self>,
+        request: PreviewRequest,
+        success: bool,
+        document: Option<RenderedDocument>,
+    ) {
+        let completion = self
+            .coordinator
+            .borrow_mut()
+            .complete_render(request, success);
+        if completion.apply_result {
+            if let Some(document) = document {
+                self.update_html(document.body_html);
+                self.set_issues(document.issues);
+            }
         }
-        self.finish_without_result();
-    }
-
-    fn finish_without_result(self: &Rc<Self>) {
-        let next = self.queue.borrow_mut().finish();
-        if let Some(next) = next {
+        if let Some(next) = completion.next_request {
             Self::start(self, next);
         }
     }
@@ -437,20 +399,6 @@ impl Inner {
 
     fn toast(&self, message: &str) {
         self.toast_overlay.add_toast(adw::Toast::new(message));
-    }
-}
-
-fn should_apply(request: &RenderRequest, epoch: u64, generation: u64) -> bool {
-    request.epoch == epoch && request.generation == generation
-}
-
-fn debounce_duration(bytes: usize) -> Duration {
-    if bytes > 500 * 1024 {
-        Duration::from_millis(500)
-    } else if bytes > 100 * 1024 {
-        Duration::from_millis(350)
-    } else {
-        Duration::from_millis(200)
     }
 }
 
@@ -711,46 +659,12 @@ fn connect_load_lifecycle(inner: &Rc<Inner>) {
 mod tests {
     use super::*;
 
-    fn request(generation: u64) -> RenderRequest {
-        RenderRequest {
-            epoch: 1,
-            generation,
-            source: generation.to_string(),
-        }
-    }
-
     #[test]
     fn preview_shell_localizes_placeholder_and_language_tag() {
         let shell = preview_shell();
         assert!(!shell.contains("__CLOUDSTACK_LOCALE__"));
         assert!(!shell.contains("__CLOUDSTACK_PREVIEW_PLACEHOLDER__"));
         assert!(shell.contains("preview-root"));
-    }
-
-    #[test]
-    fn pending_render_keeps_only_the_latest_request() {
-        let mut queue = QueueState::default();
-        assert_eq!(queue.enqueue(request(1)).unwrap().generation, 1);
-        assert!(queue.enqueue(request(2)).is_none());
-        assert!(queue.enqueue(request(3)).is_none());
-        assert_eq!(queue.finish().unwrap().generation, 3);
-        assert!(queue.finish().is_none());
-        assert!(!queue.active);
-    }
-
-    #[test]
-    fn stale_generation_or_document_epoch_is_never_applied() {
-        let current = request(8);
-        assert!(should_apply(&current, 1, 8));
-        assert!(!should_apply(&current, 2, 8));
-        assert!(!should_apply(&current, 1, 9));
-    }
-
-    #[test]
-    fn debounce_scales_with_document_size() {
-        assert_eq!(debounce_duration(10), Duration::from_millis(200));
-        assert_eq!(debounce_duration(101 * 1024), Duration::from_millis(350));
-        assert_eq!(debounce_duration(501 * 1024), Duration::from_millis(500));
     }
 
     #[test]
