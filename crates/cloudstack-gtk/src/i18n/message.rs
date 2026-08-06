@@ -408,6 +408,10 @@ pub(crate) enum UiMessage {
     ErrorInvalidArticlePath {
         path: String,
     },
+    ErrorClipboardNoImage,
+    ErrorClipboardRead,
+    ErrorAssetSave,
+    ImageSaved,
     ErrorGeneric,
 }
 
@@ -708,6 +712,10 @@ impl UiMessage {
             Self::ErrorProjectConfig => "error-project-config",
             Self::ErrorArticleAlreadyExists { .. } => "error-article-already-exists",
             Self::ErrorInvalidArticlePath { .. } => "error-invalid-article-path",
+            Self::ErrorClipboardNoImage => "error-clipboard-no-image",
+            Self::ErrorClipboardRead => "error-clipboard-read",
+            Self::ErrorAssetSave => "error-asset-save",
+            Self::ImageSaved => "image-saved",
             Self::ErrorGeneric => "error-generic",
             Self::GitUnmanagedSuffix => "git-unmanaged-suffix",
             Self::GitStagedSuffix => "git-staged-suffix",
@@ -1260,6 +1268,10 @@ pub(crate) fn message_samples() -> Vec<UiMessage> {
         UiMessage::ErrorInvalidArticlePath {
             path: "../outside.md".to_owned(),
         },
+        UiMessage::ErrorClipboardNoImage,
+        UiMessage::ErrorClipboardRead,
+        UiMessage::ErrorAssetSave,
+        UiMessage::ImageSaved,
         UiMessage::ErrorGeneric,
     ]
 }

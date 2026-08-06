@@ -477,11 +477,20 @@ fn paste_clipboard_image(
         let texture = match result {
             Ok(Some(texture)) => texture,
             Ok(None) => {
-                show_error(&widgets, "剪贴板没有可读取的图片");
+                show_user_facing(
+                    &widgets,
+                    i18n::user_facing_message(
+                        UiMessage::ErrorClipboardNoImage,
+                        "clipboard did not provide an image",
+                    ),
+                );
                 return;
             }
             Err(error) => {
-                show_error(&widgets, &format!("读取剪贴板图片失败：{error}"));
+                show_user_facing(
+                    &widgets,
+                    i18n::user_facing_message(UiMessage::ErrorClipboardRead, error.to_string()),
+                );
                 return;
             }
         };
@@ -499,7 +508,7 @@ fn paste_clipboard_image(
         let outcome = match assets::save_image(&context, &post_id, None, png.as_ref()) {
             Ok(outcome) => outcome,
             Err(error) => {
-                show_error(&widgets, &error.to_string());
+                show_user_facing(&widgets, i18n::asset_save_error(&error));
                 return;
             }
         };
@@ -509,7 +518,7 @@ fn paste_clipboard_image(
         widgets
             .buffer
             .insert_at_cursor(&format!("![]({})", outcome.image.markdown_path));
-        toast(&widgets, "图片已保存并插入文章");
+        toast(&widgets, &i18n::text(UiMessage::ImageSaved));
     });
 }
 
@@ -1655,7 +1664,10 @@ fn show_error(widgets: &Widgets, message: &str) {
 }
 
 fn show_user_facing_error(widgets: &Widgets, error: &AppError) {
-    let mapped = i18n::user_facing_error(error);
+    show_user_facing(widgets, i18n::user_facing_error(error));
+}
+
+fn show_user_facing(widgets: &Widgets, mapped: i18n::UserFacingError) {
     show_error(widgets, &i18n::text(mapped.message));
     if let Some(diagnostic) = mapped.diagnostic {
         log::warn!("用户操作失败：{diagnostic}");

@@ -9,6 +9,16 @@ pub(crate) struct UserFacingError {
     pub(crate) diagnostic: Option<String>,
 }
 
+pub(crate) fn user_facing_message(
+    message: UiMessage,
+    diagnostic: impl Into<String>,
+) -> UserFacingError {
+    UserFacingError {
+        message,
+        diagnostic: Some(diagnostic.into()),
+    }
+}
+
 pub(crate) fn user_facing_error(error: &AppError) -> UserFacingError {
     let message = match error {
         AppError::ExternalModificationConflict => UiMessage::ErrorRevisionConflict,
@@ -25,10 +35,11 @@ pub(crate) fn user_facing_error(error: &AppError) -> UserFacingError {
         _ => UiMessage::ErrorGeneric,
     };
 
-    UserFacingError {
-        message,
-        diagnostic: Some(error.to_string()),
-    }
+    user_facing_message(message, error.to_string())
+}
+
+pub(crate) fn asset_save_error(error: &AppError) -> UserFacingError {
+    user_facing_message(UiMessage::ErrorAssetSave, error.to_string())
 }
 
 #[cfg(test)]
@@ -83,5 +94,15 @@ mod tests {
         let mapped = user_facing_error(&AppError::Config("secret detail".to_owned()));
         let rendered = super::super::text(mapped.message);
         assert!(!rendered.contains("secret detail"));
+    }
+
+    #[test]
+    fn asset_save_uses_an_image_specific_primary_message() {
+        let mapped = asset_save_error(&AppError::Io("permission denied".to_owned()));
+        assert_eq!(mapped.message, UiMessage::ErrorAssetSave);
+        assert!(mapped
+            .diagnostic
+            .as_deref()
+            .is_some_and(|text| text.contains("permission denied")));
     }
 }
