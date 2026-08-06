@@ -179,6 +179,7 @@ name = "cloudstack-application"
 version = "0.2.4"
 dependencies = [
  "cloudstack-core",
+ "serde_json",
  "tempfile",
 ]
 

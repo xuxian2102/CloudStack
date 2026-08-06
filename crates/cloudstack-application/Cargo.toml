@@ -11,4 +11,5 @@ authors.workspace = true
 cloudstack-core = { path = "../cloudstack-core" }
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile = "3"

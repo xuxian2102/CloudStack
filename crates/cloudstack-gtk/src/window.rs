@@ -17,13 +17,14 @@ use cloudstack_core::error::AppError;
 use cloudstack_core::model::{PostDocument, PostSummary, ProjectContext, RepositorySnapshot};
 use cloudstack_core::services::assets::PendingAssetManager;
 use cloudstack_core::services::operations::RecoveredRename;
-use cloudstack_core::services::{assets, git, operations, posts, project};
+use cloudstack_core::services::{assets, git, posts, project};
 use gtk::{gdk, gio, glib};
 use sourceview::prelude::*;
 
 use crate::i18n::{self, UiMessage};
 use crate::search::SearchPanel;
 use crate::tasks;
+use cloudstack_application::workspace::{open_workspace, OpenWorkspaceOutcome};
 use cloudstack_application::{
     apply_successful_save, capabilities_for, classify_save_completion, SaveCompletionOutcome,
     WorkspaceCapabilities, WorkspaceCapabilitiesInput,
@@ -51,18 +52,6 @@ struct EditorState {
     git_refresh_generation: u64,
     /// 当前会话中已修改但尚未写回磁盘的文章快照。允许切换文章时保留编辑内容。
     unsaved_documents: HashMap<String, PostDocument>,
-}
-
-enum OpenProjectOutcome {
-    Opened(ProjectContext, Vec<PostSummary>, Vec<RecoveredRename>),
-    NeedsInitialization {
-        root: PathBuf,
-        suggested_content_dir: String,
-    },
-    NeedsContentRepair {
-        root: PathBuf,
-        content_dir: String,
-    },
 }
 
 #[derive(Clone)]
@@ -817,102 +806,35 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
     }
     let scanning_status = i18n::text(UiMessage::ProjectScanningStatus);
     set_busy(widgets, state, true, &scanning_status);
-    let path = path.to_owned();
+    let root = path.to_owned();
+    // glib 路径发现留在主线程；application 层只接收普通 owned PathBuf。
+    let application_data = app_data_dir();
     let widgets = widgets.clone();
     let state = Rc::clone(state);
     tasks::run(
-        move || match project::open_project(&path) {
-            Ok(context) => {
-                // CloudStack 配置是编辑器本地状态；对独立 Git 项目自动写入
-                // repository-local exclude，避免第一次打开就把配置列为待提交文件。
-                let _ = git::ensure_local_config_excluded(&context);
-                // 必须在列出文章之前恢复：上次意外退出可能留下了半完成的重命名，
-                // 不先把它续完，文章列表可能同时看到消失的旧 id 和还没出现的新 id。
-                let recovered = operations::recover_pending_renames(&app_data_dir(), &context);
-                let post_summaries = posts::list_posts(&context)?;
-                Ok(OpenProjectOutcome::Opened(
-                    context,
-                    post_summaries,
-                    recovered,
-                ))
-            }
-            Err(cloudstack_core::error::AppError::MissingProjectConfig) => {
-                let suggested_content_dir = project::suggest_content_dir(&path)?;
-                Ok(OpenProjectOutcome::NeedsInitialization {
-                    root: path,
-                    suggested_content_dir,
-                })
-            }
-            Err(cloudstack_core::error::AppError::MissingContentDirectory(content_dir)) => {
-                Ok(OpenProjectOutcome::NeedsContentRepair {
-                    root: path,
-                    content_dir,
-                })
-            }
-            Err(error) => Err(error),
-        },
+        move || open_workspace(&root, &application_data),
         move |result| {
             let mut initialization = None;
             let mut content_repair = None;
             match result {
-                Ok(OpenProjectOutcome::Opened(context, post_summaries, recovered)) => {
-                    let root_for_recent = context.root.clone();
-                    widgets
-                        .project_label
-                        .set_label(&context.root.display().to_string());
-                    widgets
-                        .status_label
-                        .set_label(&i18n::text(UiMessage::ProjectOpenedStatus {
-                            count: post_summaries.len(),
-                        }));
-                    let mut editor_state = state.borrow_mut();
-                    editor_state.loading_buffer = true;
-                    editor_state.project = Some(context);
-                    editor_state.git_snapshot = None;
-                    editor_state.posts = post_summaries;
-                    editor_state.document = None;
-                    editor_state.dirty = false;
-                    editor_state.unsaved_documents.clear();
-                    editor_state.document_epoch = editor_state.document_epoch.wrapping_add(1);
-                    let epoch = editor_state.document_epoch;
-                    drop(editor_state);
-                    let post_summaries = state.borrow().posts.clone();
-                    populate_post_list(&widgets, &state, &post_summaries);
-                    let empty_post_list = i18n::text(UiMessage::InitialPostListText);
-                    widgets.buffer.set_text(&format!("{empty_post_list}\n"));
-                    state.borrow_mut().loading_buffer = false;
-                    widgets.preview.clear(epoch);
-                    #[cfg(feature = "e2e")]
-                    widgets.frontmatter_split.set_show_sidebar(
-                        std::env::var_os("CLOUDSTACK_E2E_PROPERTIES_OPEN").is_some(),
+                Ok(OpenWorkspaceOutcome::Opened {
+                    context,
+                    post_summaries,
+                    recovered_renames,
+                }) => {
+                    apply_opened_workspace(
+                        &widgets,
+                        &state,
+                        context,
+                        post_summaries,
+                        recovered_renames,
                     );
-                    #[cfg(not(feature = "e2e"))]
-                    widgets.frontmatter_split.set_show_sidebar(false);
-                    let folder_name = project_folder_name(&root_for_recent);
-                    widgets
-                        .window
-                        .set_title(Some(&i18n::text(UiMessage::WindowTitle {
-                            folder: folder_name,
-                        })));
-                    widgets.content_stack.set_visible_child_name("workspace");
-                    recent::touch(&root_for_recent);
-                    recent::maybe_reopen_last_document(&widgets, &state, root_for_recent.clone());
-                    frontmatter::refresh(&widgets, &state);
-                    git_panel::refresh(&widgets, &state);
-                    if !recovered.is_empty() {
-                        toast(
-                            &widgets,
-                            &i18n::text(UiMessage::ArticleRenameRecovered {
-                                count: recovered.len(),
-                            }),
-                        );
-                    }
                 }
-                Ok(OpenProjectOutcome::NeedsInitialization {
+                Ok(OpenWorkspaceOutcome::NeedsInitialization {
                     root,
                     suggested_content_dir,
                 }) => initialization = Some((root, suggested_content_dir)),
-                Ok(OpenProjectOutcome::NeedsContentRepair { root, content_dir }) => {
+                Ok(OpenWorkspaceOutcome::NeedsContentRepair { root, content_dir }) => {
                     content_repair = Some((root, content_dir));
                 }
                 Err(error) => show_user_facing_error(&widgets, &error),
@@ -938,6 +860,68 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
             }
         },
     );
+}
+
+/// `open_project()` 后台任务成功打开一个 workspace 后调用：把 outcome 安装进
+/// `EditorState` 和界面，这些都是具体 GTK 展示决策，不属于 application 层。
+fn apply_opened_workspace(
+    widgets: &Widgets,
+    state: &Rc<RefCell<EditorState>>,
+    context: ProjectContext,
+    post_summaries: Vec<PostSummary>,
+    recovered_renames: Vec<RecoveredRename>,
+) {
+    let root_for_recent = context.root.clone();
+    widgets
+        .project_label
+        .set_label(&context.root.display().to_string());
+    widgets
+        .status_label
+        .set_label(&i18n::text(UiMessage::ProjectOpenedStatus {
+            count: post_summaries.len(),
+        }));
+    let mut editor_state = state.borrow_mut();
+    editor_state.loading_buffer = true;
+    editor_state.project = Some(context);
+    editor_state.git_snapshot = None;
+    editor_state.posts = post_summaries;
+    editor_state.document = None;
+    editor_state.dirty = false;
+    editor_state.unsaved_documents.clear();
+    editor_state.document_epoch = editor_state.document_epoch.wrapping_add(1);
+    let epoch = editor_state.document_epoch;
+    drop(editor_state);
+    let post_summaries = state.borrow().posts.clone();
+    populate_post_list(widgets, state, &post_summaries);
+    let empty_post_list = i18n::text(UiMessage::InitialPostListText);
+    widgets.buffer.set_text(&format!("{empty_post_list}\n"));
+    state.borrow_mut().loading_buffer = false;
+    widgets.preview.clear(epoch);
+    #[cfg(feature = "e2e")]
+    widgets
+        .frontmatter_split
+        .set_show_sidebar(std::env::var_os("CLOUDSTACK_E2E_PROPERTIES_OPEN").is_some());
+    #[cfg(not(feature = "e2e"))]
+    widgets.frontmatter_split.set_show_sidebar(false);
+    let folder_name = project_folder_name(&root_for_recent);
+    widgets
+        .window
+        .set_title(Some(&i18n::text(UiMessage::WindowTitle {
+            folder: folder_name,
+        })));
+    widgets.content_stack.set_visible_child_name("workspace");
+    recent::touch(&root_for_recent);
+    recent::maybe_reopen_last_document(widgets, state, root_for_recent.clone());
+    frontmatter::refresh(widgets, state);
+    git_panel::refresh(widgets, state);
+    if !recovered_renames.is_empty() {
+        toast(
+            widgets,
+            &i18n::text(UiMessage::ArticleRenameRecovered {
+                count: recovered_renames.len(),
+            }),
+        );
+    }
 }
 
 fn show_content_repair_dialog(

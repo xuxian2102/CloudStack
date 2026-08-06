@@ -50,7 +50,7 @@
 
 ## 新增 `cloudstack-application` crate（用户提出，2026-08-07，P1 收尾后的下一步）
 
-**状态：第 1～7 项已全部完成（第 7 项拆成 7A/7B/7C 三轮，理由见下）。测试数量全程守恒可核对到 275，`cargo tree -p cloudstack-application --edges normal` 确认零 GTK/GLib/GIO/Adwaita/WebKit 依赖，且不依赖 `cloudstack-renderer`。第 8 项尚未开始。**
+**状态：第 1～8 项已全部完成（第 7 项拆成 7A/7B/7C 三轮，理由见下）。测试数量全程守恒可核对到 280，`cargo tree -p cloudstack-application --edges normal` 确认零 GTK/GLib/GIO/Adwaita/WebKit 依赖，且不依赖 `cloudstack-renderer`。application-layer 第一阶段收尾，`EditorState → WorkspaceSession` 留给下一阶段单独设计。**
 
 ```text
 第 1 轮：新建 crate + 迁移 save/settings/git_refresh          [x] 21 个测试
@@ -62,7 +62,7 @@
 第 7A 轮：草稿存储策略 + 批量保存/丢弃 use case               [x]  7 个测试
 第 7B 轮：FIFO Coordinator + DraftOperation/DraftCompletion   [x]  4 个测试
 第 7C 轮：恢复资格判定 + 草稿比较策略                          [x]  5 个测试
-第 8 项：OpenWorkspace use case                               [ ] 未开始
+第 8 轮：OpenWorkspace use case                               [x]  5 个测试
 ```
 
 依赖方向 `cloudstack-gtk → cloudstack-application → cloudstack-core`（外加 `cloudstack-gtk → cloudstack-renderer → cloudstack-core`）已经是编译期边界，不再只是"目录上的分层"。
@@ -161,7 +161,15 @@ cloudstack-gtk ───────→ cloudstack-application ─────�
 
    第 7 项至此全部完成：`drafts.rs` 不再拥有存储策略、批量 use case、FIFO 队列、恢复 policy 这四类应用状态机，只保留 700ms 定时器、SourceView 读取、对话框、toast/status 展示这些确实只对当前 GTK 界面有意义的部分。
 
-8. **项目打开 use case**：`open_project()` 后台任务做的 `project::open_project → ensure_local_config_excluded → recover_pending_renames → list_posts` 四步、以及 `Opened`/`NeedsInitialization`/`NeedsContentRepair` 的区分，是一个完整 application use case。迁成 `pub fn open_workspace(root: &Path, app_data_dir: &Path) -> Result<OpenWorkspaceOutcome, AppError>`，GTK 的 `open_project()` 变成"读取文件选择器结果 → 后台调用 `open_workspace()` → 根据 outcome 展示 workspace/初始化对话框/修复对话框"。文章 create/rename/delete 中"执行操作后重新 `list_posts`"的组合也可以随后迁入。
+8. [x] **项目打开 use case**：`open_project()` 后台任务原来做的 `project::open_project → ensure_local_config_excluded → recover_pending_renames → list_posts` 四步、以及 `Opened`/`NeedsInitialization`/`NeedsContentRepair` 的区分，已迁入 `cloudstack-application/src/workspace.rs` 的 `pub fn open_workspace(root: &Path, app_data_dir: &Path) -> Result<OpenWorkspaceOutcome, AppError>`（原 GTK 本地的 `OpenProjectOutcome::Opened(ProjectContext, Vec<PostSummary>, Vec<RecoveredRename>)` 元组变体在迁移时顺手改成了更易读的结构体变体 `Opened { context, post_summaries, recovered_renames }`，字段语义不变）。四步的执行顺序和失败语义原样保留：`ensure_local_config_excluded` 失败仍是 best-effort（`let _ =`，不阻止打开一个本来有效的项目）；`recover_pending_renames` 必须先于 `list_posts` 执行（上次意外退出可能留下半完成的重命名，不先续完文章列表会同时看到消失的旧 id 和还没出现的新 id）；`MissingProjectConfig`/`MissingContentDirectory` 转成对应的引导 outcome，其余错误原样上抛。
+
+   `app_data_dir()` 依赖 `glib::user_data_dir()`，仍然留在 GTK；`open_project()` 里原来在后台闭包内部才调用 `app_data_dir()`，现在改成在主线程先算出 owned `PathBuf`（`let application_data = app_data_dir();`），再随 `root` 一起移进后台闭包——避免从后台线程调用 GLib API，顺手把这一处也理清楚了。GTK 侧原来 `Opened` 分支内联的一大段（project/status label、`EditorState` 安装、`ListBox` 填充、SourceView placeholder、WebKit preview 清空、frontmatter 侧栏可见性、窗口标题、`content_stack` 切换、`recent::touch`/`maybe_reopen_last_document`、frontmatter/Git 面板刷新、重命名恢复 toast）原样提取成新的私有函数 `apply_opened_workspace()`，逻辑不变，只是从内联代码变成具名函数，让 `open_project()` 本身更容易读；这些全部是具体 GTK 展示/session 安装决策，不属于 application 层。`NeedsInitialization`/`NeedsContentRepair` 两个分支、E2E 自动打开首篇文章的逻辑、初始化和修复对话框、`busy` guard 都原样留在 GTK。
+
+   本轮没有引入 `OpenWorkspaceCoordinator`/ticket/generation——当前入口已经有 `busy` guard 挡住重复打开，不存在两个 open operation 乱序覆盖的问题，加这些属于当前用不上的过度设计，留给以后允许后台预加载/多窗口/可取消打开时再做。
+
+   **测试**：新增 5 个，均按预期命名：`missing_config_requests_initialization_with_existing_content_suggestion`、`missing_content_directory_requests_repair`、`opening_workspace_lists_posts`、`opening_git_workspace_excludes_cloudstack_config_locally`、`rename_recovery_runs_before_post_listing`（最后一个是这一项最有价值的测试——不是重复 core 层已经覆盖过的恢复算法本身，而是验证 application use case 按正确顺序调用了它，构造了一份手写的 rename journal JSON 放进 `app_data_dir/operations/`，断言 `open_workspace()` 返回时重命名已经恢复完成、`list_posts` 看到的是恢复后的文件名）。`cloudstack-application` 75 → 80（+5），`cloudstack-gtk` 不变，workspace 总数 275 → 280，与预期完全吻合。
+
+   第 8 项完成后，application-layer 第一阶段（1～8 项）全部收尾。文章 create/rename/delete 中"执行操作后重新 `list_posts`"的组合、`EditorState → WorkspaceSession` 的最终收敛，都留给下一阶段单独排期，不在这轮范围内。
 
 ### 应该迁到 core、而不是 application 的逻辑
 

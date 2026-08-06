@@ -13,6 +13,7 @@ pub mod publish;
 pub mod recent;
 pub mod save;
 pub mod settings;
+pub mod workspace;
 
 pub use controls::{capabilities_for, WorkspaceCapabilities, WorkspaceCapabilitiesInput};
 pub use git_refresh::should_apply_git_refresh;
