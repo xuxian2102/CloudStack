@@ -415,7 +415,11 @@ pub fn save_image(
                 format.canonical_extension()
             );
             let desired_path = asset_dir.join(&desired);
-            if desired_path.is_file() && fs::read(&desired_path)? == bytes {
+            // 有界比较：已有文件如果被外部换成了几 GB 大文件，粘贴一张小图片时
+            // 也不应该把它整个读进内存——大小不等直接判定内容不同。
+            let matches_existing = desired_path.is_file()
+                && read_bounded_file(&desired_path, bytes.len() as u64)?.as_deref() == Some(bytes);
+            if matches_existing {
                 (desired, false)
             } else if desired_path.exists() {
                 // 8 位短哈希理论上可能碰撞，也可能被同名目录占用；绝不能覆盖。

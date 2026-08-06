@@ -6,7 +6,7 @@
 
 ## P1（建议在下一个强调可靠性的版本前修复）
 
-全部 5 项已修复（分四轮实施，`main` 在 v0.2.4 之后的提交里）。规划见 `/home/xuxian/.claude/plans/stateful-toasting-key.md`。
+全部 5 项已修复（分四轮实施 + 一轮针对 rename journal 恢复状态机的修复，`main` 在 v0.2.4 之后的提交里）。
 
 - [x] **Git 状态刷新缺少 generation/token 校验，存在乱序覆盖窗口**（第 1 轮）
   `EditorState` 加 `git_refresh_generation: u64`；`git_panel::refresh()` 完成回调改用新增的纯函数 `app::should_apply_git_refresh`（`crates/cloudstack-gtk/src/app/git_refresh.rs`）同时校验 root 与 generation。
@@ -22,6 +22,13 @@
   **范围收敛**：只覆盖 `rename_post`，不含 `delete_post`（已经走系统回收站，本身可恢复，风险明显更低，留给以后需要时再扩展 `operations.rs` 加 `DeleteOperation`）。
   **测试缺口**：`rollback_asset_moves` 本身失败（"回滚的回滚也失败"）这个分支的自动化测试没有写——工程上很难在不侵入代码的前提下可靠地只让"回滚"这一步失败而不影响它要回滚的那次"正向"操作（两者需要同一目录的写权限，无法用静态 chmod 区分方向，又没有代码钩子能在函数执行中途插入扰动）。逻辑本身是一个简单的布尔与运算，人工审阅可信度足够高，但如果以后要重构这块代码建议先补一个依赖注入点再补测试。
 
+  **后续修复（针对第 4 轮的代码评审反馈，同一个 P1 之内）**：
+  - 恢复状态机原来把"source/target 都存在（冲突）"和"source/target 都不存在（缺失）"两种反常状态直接当成"已经完成"处理，会把不确定状态误判为恢复成功、删掉 journal。改成显式的 `MoveRecoveryState`（`Pending`/`Completed`）+ `classify_move_state`：用 `symlink_metadata` 而不是 `exists()` 区分普通文件/符号链接/目录，只有"明确没做"或"明确做完"这两种状态才继续，其余一律整体中止本次恢复、保留 journal，不猜测哪种是"正确"的现实状态。文章重命名那一步用同一个函数判断。新增 4 个测试覆盖冲突/双缺/类型不对三种反常状态。
+  - journal 原来存的是 `asset_moves: Vec<(PathBuf, PathBuf)>` 绝对路径，恢复时直接信任。改成只存 `asset_names: Vec<String>`（文件名），恢复时用当前 `ProjectContext` 重新推导 asset 目录（重新走一遍 `resolve_post_path`/`asset_dir_for_post` 里的路径守卫），把 journal 当成不可信的持久化输入处理；恢复前会先对 journal 里全部路径做一遍只读分类，任何一个不合法就整体中止，不会移动到一半才发现后面的路径有问题。
+  - `save_image` 剪贴板内容寻址分支里 `fs::read(&desired_path)? == bytes` 的去重比较是无界读取，改成复用 `read_bounded_file`（上限设为 `bytes.len()`，大小不等直接判定内容不同，不读完整个文件）。
+  - `read_rename_journal` 原来是整体 `fs::read` 后再检查 256 KiB 上限，改成 `Read::take` 有界读取，和图片那边的有界读取原则保持一致。
+  - **有意不做的部分**：journal 自身的写入是 fsync 过的原子替换，但 `fs::rename` 之后没有对受影响目录逐一 `fsync`，journal 删除后也没有再同步 `operations/` 目录本身——当前只保证"应用进程被杀掉"这一档的崩溃安全（process crash safety），不是内核崩溃/断电也不丢状态的 power-loss safety。真要做到后者，需要在每次目录项变更后都跟一次目录 fsync（journal → fsync operations/ → 资产 rename → fsync 各自 parent → 文章 rename → fsync 各自 parent → 重写正文并 fsync → 删 journal → 再 fsync operations/），这会给每次重命名操作增加好几次额外的 fsync 开销。对桌面博客编辑器来说进程被杀比断电/内核崩溃常见得多，这个取舍是有意的，不是遗漏；`operations.rs` 顶部模块注释里也写明了这个范围边界。
+
 ## P2（代码质量与长期可维护性，不紧急）
 
 - [ ] **层内模块继续变大**：`git.rs`（72K）、`posts.rs`/`assets.rs`（各 40K）体量已大；`window.rs`（72K）虽已拆出 `window/{articles,frontmatter,publish,git_panel,drafts,recent,settings,welcome}.rs` 等子模块，但 `window.rs` 本体和 `git_panel.rs`（1716 行）、`drafts.rs`（1047 行）仍偏大，可按职责继续下沉（如 `services/git/{command,status,scope,publish,remote}.rs`）。
@@ -29,6 +36,7 @@
 - [ ] **大量路径暂存可能触发 ARG_MAX**：`add_args`/`commit_args`（`git.rs` 约 L1181-1182, 1202-1203）把所有路径放进 argv。方向：`git add --pathspec-from-file=- --pathspec-file-nul` 走 stdin；commit message 增加非空/无 NUL/长度上限校验（目前 `message: &str` 直接拼进 `commit_args`，约 L1202，完全无校验）。
 - [ ] **路径校验仍有本地 TOCTOU 窗口**：canonicalize/符号链接检查与实际打开文件之间可能被本地进程替换。方向（仅 Linux 目标可行）：`openat2` + `RESOLVE_BENEATH`/`RESOLVE_NO_SYMLINKS`，或 `cap-std`/`rustix` 能力目录。
 - [ ] **缺少三类专门测试**：① rename 各阶段的故障注入测试（模拟崩溃/重启后验证一致性）；② porcelain 解析、Markdown URL 过滤、frontmatter lossless 修改、图片路径 percent-decode、重命名路径改写的 fuzz/property test；③ MSRV 独立 CI 任务、`cargo deny`、GitHub Actions 完整 SHA 固定。
+- [ ] **（预置 bug，非本轮引入）reference 式图片重命名会断链**：`referenced_colocated_image_files()` 会把 `![cover][hero]` + `[hero]: hello/cover.png` 这种引用式定义里的图片也纳入移动计划（用的是解析后的 `dest_url`），但 `rewrite_colocated_image_paths()` 明确跳过引用式图片（`inline_image_destination_range` 找不到就 `continue`，注释写着"引用式图片的真实 URL 位于定义处，不属于这段源码"）。结果是图片文件被移动到新目录，但 `[hero]: hello/cover.png` 这行定义还指向旧路径，链接失效。建议作为独立的 correctness fix 尽快处理，不要等到大重构——不属于这轮 P1 的崩溃恢复/编码/图片校验范畴，是重命名路径改写逻辑本身的既有 bug。
 
 ## 建议实施顺序（原审阅给出，供参考）
 

@@ -3,25 +3,43 @@
 //! 单个 `fs::rename` 是原子的，但"移动图片 → 移动文章 → 重写正文图片路径"这一
 //! 整套动作不是。正常的 in-process 失败（比如某次 rename 权限不够）已经由
 //! `rename_post` 自己做 best-effort 回滚处理；这里要兜的是更狠的情况——应用
-//! 或者操作系统在文件移动到一半时被杀掉，回滚代码根本没有机会运行。
+//! 进程在文件移动到一半时被杀掉（`kill -9`、崩溃、用户在系统层面强制结束），
+//! 回滚代码根本没有机会运行。
 //!
 //! 做法是在开始移动任何文件之前，把完整操作意图（谁改名成谁、哪些图片要跟着
 //! 搬）写进一个 fsync 过的 journal 文件。下次打开同一个项目时扫描这个目录，
 //! 把还没删除的 journal 代表的操作"继续做完"（forward-only，不做回滚）：
 //!
-//! * 图片移动、文章重命名两步都可以只看当前文件系统状态就判断"做没做过"，
-//!   幂等地补上没做的部分；
+//! * 图片移动、文章重命名两步都只看当前文件系统状态判断"做没做过"，幂等地
+//!   补上没做的部分——但只有明确是"还没做"（source 是普通文件、target 不存在）
+//!   或"已经做完"（source 不存在、target 是普通文件）这两种状态才继续；其余
+//!   状态（双方都存在、双方都不存在、类型不是普通文件/是符号链接）一律整体
+//!   中止本次恢复、保留 journal，不去猜测哪一种是"正确"的现实状态；
+//!   （用 `symlink_metadata` 而不是 `exists()`，避免符号链接、断链符号链接被
+//!   误判成普通文件。）
 //! * 正文重写复用 `rewrite_colocated_image_paths`，它本身对已经重写过的内容
 //!   是幂等的（只找旧目录名前缀，重写后就再也找不到）。
+//!
+//! journal 只记录 `old_id`/`new_id`/图片文件名，不记录绝对路径——恢复时用
+//! 当前的 `ProjectContext` 重新推导 asset 目录（重新走一遍 `resolve_post_path`
+//! 里的路径守卫），把 journal 当成不可信的持久化输入：文件损坏、跨版本升级、
+//! 用户手动编辑，都不应该让恢复逻辑直接对着 journal 里存的任意路径操作。
 //!
 //! 之所以选择"继续做完"而不是"回滚"：回滚需要能撤销已经发生的文件系统改动，
 //! 但如果连正常回滚都会失败（`rename_post` 里已经有这种情况——见
 //! `finish_after_rollback`），崩溃恢复场景下更不能假设回滚一定能成功。把所有
 //! journal 都导向"完成新状态"这一个方向，不需要区分"回滚式 journal"和"完成式
 //! journal"两种语义，恢复逻辑更简单也更容易验证。
+//!
+//! **范围说明**：这里保证的是"应用进程被杀掉"这一档的崩溃安全——journal 自身
+//! 的写入是 fsync 过的原子替换，但 `fs::rename` 之后没有对受影响的目录逐一
+//! `fsync`，journal 删除后也没有再同步 `operations/` 目录本身。真正做到内核
+//! 崩溃/断电也不丢状态（power-loss safety）还需要在每次目录项变更后都跟一次
+//! 目录 fsync，这里暂时没有做——对桌面博客编辑器而言，进程被杀比内核崩溃/断电
+//! 常见得多，这个取舍是有意的，不是遗漏。
 
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
@@ -34,14 +52,15 @@ use crate::path_guard::resolve_post_path;
 use crate::services::assets::asset_dir_for_post;
 use crate::services::posts;
 
-const MAX_OPERATION_JOURNAL_BYTES: usize = 256 * 1024;
+const MAX_OPERATION_JOURNAL_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RenameOperation {
     project_root: PathBuf,
     old_id: String,
     new_id: String,
-    asset_moves: Vec<(PathBuf, PathBuf)>,
+    /// 图片的文件名，不是路径——恢复时在当前 `ctx` 下重新推导所在目录。
+    asset_names: Vec<String>,
 }
 
 /// 一次成功恢复的重命名操作，供调用方（GTK 层）向用户展示。
@@ -86,11 +105,25 @@ pub(crate) fn write_rename_journal(
     new_id: &str,
     asset_moves: &[(PathBuf, PathBuf)],
 ) -> Result<PathBuf, AppError> {
+    // 只存文件名，不存 source/target 的绝对路径；两者的文件名本来就相同
+    // （`plan_colocated_asset_moves` 只换目录、不改名）。
+    let asset_names = asset_moves
+        .iter()
+        .map(|(source, _)| {
+            source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    AppError::Io(format!("图片路径没有合法文件名：{}", source.display()))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let operation = RenameOperation {
         project_root: ctx.root.clone(),
         old_id: old_id.to_owned(),
         new_id: new_id.to_owned(),
-        asset_moves: asset_moves.to_vec(),
+        asset_names,
     };
     let dir = operations_dir(app_data_dir);
     fs::create_dir_all(&dir)?;
@@ -134,50 +167,110 @@ fn quarantine_journal(path: &Path, reason: &str) {
 }
 
 fn read_rename_journal(path: &Path) -> Result<RenameOperation, String> {
-    let bytes = fs::read(path).map_err(|error| error.to_string())?;
-    if bytes.len() > MAX_OPERATION_JOURNAL_BYTES {
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut limited = file.take(MAX_OPERATION_JOURNAL_BYTES + 1);
+    let mut bytes = Vec::new();
+    limited
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MAX_OPERATION_JOURNAL_BYTES {
         return Err("操作日志文件异常过大".to_owned());
     }
     serde_json::from_slice(&bytes).map_err(|error| error.to_string())
 }
 
-/// 幂等的"继续完成"：每一步都先看当前文件系统状态判断"做没做过"，只补没做的
-/// 部分，可以在任意中间态上安全地重复调用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MoveRecoveryState {
+    /// source 是普通文件、target 不存在：这一步还没做，可以安全地继续。
+    Pending,
+    /// source 不存在、target 是普通文件：这一步已经做完，跳过。
+    Completed,
+}
+
+/// 用 `symlink_metadata` 而不是 `exists()`，避免符号链接/断链符号链接被误判成
+/// 普通文件。只有两种状态可以安全判断该怎么做；其余一律报错——双方都存在是
+/// 冲突（不知道该信哪一个），双方都不存在是缺失（这一步的输入凭空消失了），
+/// 类型不对（目录/符号链接）说明有别的东西占用了这个位置，都不该被静默当成
+/// "已经完成"。`kind` 只用来让错误信息说清楚是图片还是文章路径出的问题。
+fn classify_move_state(
+    source: &Path,
+    target: &Path,
+    kind: &str,
+) -> Result<MoveRecoveryState, AppError> {
+    let source_meta = fs::symlink_metadata(source).ok();
+    let target_meta = fs::symlink_metadata(target).ok();
+    let is_plain_file = |meta: &Option<fs::Metadata>| {
+        meta.as_ref()
+            .is_some_and(|m| m.is_file() && !m.file_type().is_symlink())
+    };
+
+    match (source_meta.is_some(), target_meta.is_some()) {
+        (true, false) if is_plain_file(&source_meta) => Ok(MoveRecoveryState::Pending),
+        (false, true) if is_plain_file(&target_meta) => Ok(MoveRecoveryState::Completed),
+        _ => Err(AppError::Io(format!(
+            "重命名恢复中止：{kind}路径处于无法安全判断的状态（{} / {}），已保留操作日志待下次重试",
+            source.display(),
+            target.display()
+        ))),
+    }
+}
+
+fn validate_bare_file_name(name: &str) -> Result<(), AppError> {
+    let is_bare =
+        !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0']);
+    if is_bare {
+        Ok(())
+    } else {
+        Err(AppError::Io(format!(
+            "操作日志包含非法的图片文件名：{name:?}"
+        )))
+    }
+}
+
+/// 幂等的"继续完成"：先对 journal 里记录的每一步做只读分类，任何一步处于
+/// 无法安全判断的状态就整体中止、不执行任何移动——journal 代表的是单个原子
+/// 操作，不能移动了一半才发现后面的路径有问题。分类全部通过后才真正执行还
+/// 没做的部分。资产目录本身也是当场用当前 `ctx` 重新推导（重新走一遍
+/// `resolve_post_path`/`asset_dir_for_post` 里的路径守卫），不信任 journal
+/// 里可能是旧版本或者被篡改过的绝对路径。
 fn apply_rename_recovery(
     ctx: &ProjectContext,
     operation: &RenameOperation,
 ) -> Result<(), AppError> {
-    for (source, target) in &operation.asset_moves {
-        if target.exists() {
-            continue; // 已经搬过
-        }
-        if !source.exists() {
-            // 两边都不存在：这一步没法恢复了（比如用户在崩溃后手动清理过），
-            // 交给后面的正文重写按当前实际的文件系统状态处理，不中止整个恢复。
-            continue;
-        }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::rename(source, target)?;
+    let old_asset_dir = asset_dir_for_post(ctx, &operation.old_id)?;
+    let new_asset_dir = asset_dir_for_post(ctx, &operation.new_id)?;
+
+    let mut asset_moves = Vec::with_capacity(operation.asset_names.len());
+    for name in &operation.asset_names {
+        validate_bare_file_name(name)?;
+        let source = old_asset_dir.join(name);
+        let target = new_asset_dir.join(name);
+        let state = classify_move_state(&source, &target, "图片")?;
+        asset_moves.push((source, target, state));
     }
 
     let old_path = resolve_post_path(&ctx.content_root, &ctx.config.extensions, &operation.old_id)?;
     let new_path = resolve_post_path(&ctx.content_root, &ctx.config.extensions, &operation.new_id)?;
-    if old_path.exists() && !new_path.exists() {
+    let post_state = classify_move_state(&old_path, &new_path, "文章")?;
+
+    for (source, target, state) in &asset_moves {
+        if *state == MoveRecoveryState::Pending {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::rename(source, target)?;
+        }
+    }
+    if post_state == MoveRecoveryState::Pending {
         if let Some(parent) = new_path.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::rename(&old_path, &new_path)?;
     }
 
-    if new_path.is_file() {
-        posts::reapply_colocated_image_rewrite(&new_path, &operation.old_id, &operation.new_id)?;
-    }
-
-    if let Ok(old_asset_dir) = asset_dir_for_post(ctx, &operation.old_id) {
-        posts::remove_dir_if_empty(&old_asset_dir);
-    }
+    // 走到这里，两种分类结果都已经确保 new_path 现在是普通文件。
+    posts::reapply_colocated_image_rewrite(&new_path, &operation.old_id, &operation.new_id)?;
+    posts::remove_dir_if_empty(&old_asset_dir);
 
     Ok(())
 }
@@ -437,5 +530,121 @@ mod tests {
                     .contains("rename-broken.json.corrupt-")
             });
         assert!(quarantined, "损坏的 journal 应该被改名隔离");
+    }
+
+    #[test]
+    fn recover_aborts_and_keeps_journal_when_an_asset_path_conflicts() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let root = project_dir.path().canonicalize().unwrap();
+        let ctx = ctx_in(&root);
+        make_post(
+            &ctx,
+            "hello.md",
+            "---\ntitle: x\n---\n![](hello/cover.png)\n",
+        );
+        fs::create_dir_all(ctx.content_root.join("hello")).unwrap();
+        fs::write(ctx.content_root.join("hello/cover.png"), b"hello bytes").unwrap();
+
+        let asset_moves = vec![(
+            ctx.content_root.join("hello/cover.png"),
+            ctx.content_root.join("world/cover.png"),
+        )];
+        let journal =
+            write_rename_journal(app_data.path(), &ctx, "hello.md", "world.md", &asset_moves)
+                .unwrap();
+
+        // 矛盾状态：source 和 target 同时存在（比如崩溃后用户手动整理过文件）。
+        fs::create_dir_all(ctx.content_root.join("world")).unwrap();
+        fs::write(ctx.content_root.join("world/cover.png"), b"world bytes").unwrap();
+
+        let recovered = recover_pending_renames(app_data.path(), &ctx);
+        assert!(recovered.is_empty(), "冲突状态不应该被当成恢复成功");
+        assert!(journal.is_file(), "冲突状态必须保留 journal，不能删掉");
+        assert_eq!(
+            fs::read(ctx.content_root.join("hello/cover.png")).unwrap(),
+            b"hello bytes",
+            "冲突状态下不应该动 source"
+        );
+        assert_eq!(
+            fs::read(ctx.content_root.join("world/cover.png")).unwrap(),
+            b"world bytes",
+            "冲突状态下不应该动 target"
+        );
+    }
+
+    #[test]
+    fn recover_aborts_and_keeps_journal_when_an_asset_path_is_missing_on_both_sides() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let root = project_dir.path().canonicalize().unwrap();
+        let ctx = ctx_in(&root);
+        make_post(
+            &ctx,
+            "hello.md",
+            "---\ntitle: x\n---\n![](hello/cover.png)\n",
+        );
+        // hello/cover.png 从未被创建过：source、target 两边都不存在。
+
+        let asset_moves = vec![(
+            ctx.content_root.join("hello/cover.png"),
+            ctx.content_root.join("world/cover.png"),
+        )];
+        let journal =
+            write_rename_journal(app_data.path(), &ctx, "hello.md", "world.md", &asset_moves)
+                .unwrap();
+
+        let recovered = recover_pending_renames(app_data.path(), &ctx);
+        assert!(recovered.is_empty());
+        assert!(journal.is_file());
+        assert!(
+            ctx.content_root.join("hello.md").is_file(),
+            "无法安全判断资产状态时，文章也不应该被移动"
+        );
+        assert!(!ctx.content_root.join("world.md").exists());
+    }
+
+    #[test]
+    fn recover_aborts_and_keeps_journal_when_post_paths_conflict() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let root = project_dir.path().canonicalize().unwrap();
+        let ctx = ctx_in(&root);
+        make_post(&ctx, "hello.md", "---\ntitle: x\n---\nbody\n");
+        fs::write(
+            ctx.content_root.join("world.md"),
+            "---\ntitle: y\n---\nsomeone else's content\n",
+        )
+        .unwrap();
+
+        let journal =
+            write_rename_journal(app_data.path(), &ctx, "hello.md", "world.md", &[]).unwrap();
+
+        let recovered = recover_pending_renames(app_data.path(), &ctx);
+        assert!(recovered.is_empty());
+        assert!(journal.is_file());
+        assert_eq!(
+            fs::read_to_string(ctx.content_root.join("world.md")).unwrap(),
+            "---\ntitle: y\n---\nsomeone else's content\n",
+            "冲突状态下不应该改写疑似冲突的目标文件"
+        );
+    }
+
+    #[test]
+    fn recover_aborts_and_keeps_journal_when_target_is_not_a_plain_file() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let root = project_dir.path().canonicalize().unwrap();
+        let ctx = ctx_in(&root);
+        // hello.md 从未创建过（模拟"文章已经移动过"的表象）；world.md 被占用成了
+        // 目录而不是普通文件。
+        fs::create_dir_all(ctx.content_root.join("world.md")).unwrap();
+
+        let journal =
+            write_rename_journal(app_data.path(), &ctx, "hello.md", "world.md", &[]).unwrap();
+
+        let recovered = recover_pending_renames(app_data.path(), &ctx);
+        assert!(recovered.is_empty());
+        assert!(journal.is_file());
     }
 }
