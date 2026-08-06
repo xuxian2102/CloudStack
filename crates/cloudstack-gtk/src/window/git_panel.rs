@@ -10,8 +10,7 @@ use cloudstack_core::services::git;
 use gtk::glib;
 
 use super::{
-    has_unsaved_documents, open_project, set_busy, show_error, toast, unsaved_document_count,
-    EditorState, Widgets,
+    drafts, has_unsaved_documents, open_project, set_busy, show_error, toast, EditorState, Widgets,
 };
 use crate::tasks;
 
@@ -48,6 +47,14 @@ pub(super) enum PrimaryAction {
     PushUpstream,
     Push,
     PullFastForward,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EffectivePrimaryAction {
+    None,
+    NoChanges,
+    SaveBeforeGit { unsaved_count: usize },
+    Git(PrimaryAction),
 }
 
 impl GitPanel {
@@ -268,8 +275,7 @@ impl GitPanel {
             self.refresh_button.set_sensitive(false);
             self.fetch_button.set_sensitive(false);
             self.untrack_config_button.set_visible(false);
-            self.publish_button.set_label("提交");
-            self.publish_button.set_sensitive(false);
+            self.set_primary_action(EffectivePrimaryAction::None);
             return;
         }
         let branch = snapshot.status.branch.as_deref().unwrap_or("—");
@@ -295,12 +301,7 @@ impl GitPanel {
             .set_visible(snapshot.config_tracked);
         self.untrack_config_button
             .set_sensitive(snapshot.config_tracked);
-        let action = recommended_action(snapshot);
-        self.publish_button.set_label(compact_action_label(action));
-        self.publish_button
-            .set_tooltip_text(Some(action_label(action)));
-        self.publish_button
-            .set_sensitive(action != PrimaryAction::None);
+        self.set_primary_action(EffectivePrimaryAction::Git(recommended_action(snapshot)));
     }
 
     pub(super) fn set_error(&self, message: &str) {
@@ -313,7 +314,7 @@ impl GitPanel {
         self.refresh_button.set_sensitive(true);
         self.fetch_button.set_sensitive(false);
         self.untrack_config_button.set_visible(false);
-        self.publish_button.set_sensitive(false);
+        self.set_primary_action(EffectivePrimaryAction::None);
     }
 
     pub(super) fn set_project_available(&self, available: bool) {
@@ -328,20 +329,52 @@ impl GitPanel {
             set_changes_placeholder(&self.changes_list, "没有改动");
             self.fetch_button.set_sensitive(false);
             self.untrack_config_button.set_visible(false);
-            self.publish_button.set_sensitive(false);
+            self.set_primary_action(EffectivePrimaryAction::None);
         }
     }
 
-    pub(super) fn reflect_unsaved_editor(&self, dirty: bool, available: bool) {
+    pub(super) fn reflect_unsaved_editor(&self, dirty: bool) {
         if dirty {
             let current = self.summary_label.text();
             if !current.starts_with("未保存 · ") {
                 self.summary_label.set_label(&format!("未保存 · {current}"));
             }
-            self.publish_button.set_label("保存");
-            self.publish_button
-                .set_tooltip_text(Some("先保存正文，再打开提交窗口"));
-            self.publish_button.set_sensitive(available);
+        } else {
+            let current = self.summary_label.text();
+            if let Some(current) = current.strip_prefix("未保存 · ") {
+                self.summary_label.set_label(current);
+            }
+        }
+    }
+
+    pub(super) fn set_primary_action(&self, action: EffectivePrimaryAction) {
+        match action {
+            EffectivePrimaryAction::None => {
+                self.publish_button.set_label("已同步");
+                self.publish_button
+                    .set_tooltip_text(Some("当前没有可执行的 Git 操作"));
+                self.publish_button.set_sensitive(false);
+            }
+            EffectivePrimaryAction::NoChanges => {
+                self.publish_button.set_label("没有可提交的更改");
+                self.publish_button
+                    .set_tooltip_text(Some("当前没有可提交的受管改动"));
+                self.publish_button.set_sensitive(false);
+            }
+            EffectivePrimaryAction::SaveBeforeGit { unsaved_count } => {
+                let label = format!("先保存 {unsaved_count} 篇");
+                let tooltip = format!("执行 Git 操作前先保存 {unsaved_count} 篇未保存文章");
+                self.publish_button.set_label(&label);
+                self.publish_button.set_tooltip_text(Some(&tooltip));
+                self.publish_button.set_sensitive(true);
+            }
+            EffectivePrimaryAction::Git(action) => {
+                self.publish_button.set_label(compact_action_label(action));
+                self.publish_button
+                    .set_tooltip_text(Some(action_label(action)));
+                self.publish_button
+                    .set_sensitive(action != PrimaryAction::None);
+            }
         }
     }
 }
@@ -381,7 +414,13 @@ pub(super) fn recommended_action(snapshot: &RepositorySnapshot) -> PrimaryAction
     }
     match snapshot.topology {
         RepositoryTopology::NotInitialized => PrimaryAction::Initialize,
-        RepositoryTopology::NoCommit => PrimaryAction::Commit,
+        RepositoryTopology::NoCommit => {
+            if snapshot.worktree.managed_changes > 0 {
+                PrimaryAction::Commit
+            } else {
+                PrimaryAction::None
+            }
+        }
         RepositoryTopology::NoRemote => {
             if snapshot.worktree.managed_changes > 0 {
                 PrimaryAction::Commit
@@ -413,6 +452,29 @@ pub(super) fn recommended_action(snapshot: &RepositorySnapshot) -> PrimaryAction
         }
         RepositoryTopology::ParentRepository | RepositoryTopology::Detached => PrimaryAction::None,
     }
+}
+
+pub(super) fn effective_primary_action(
+    snapshot: Option<&RepositorySnapshot>,
+    busy: bool,
+    unsaved_count: usize,
+) -> EffectivePrimaryAction {
+    if busy {
+        return EffectivePrimaryAction::None;
+    }
+    if unsaved_count > 0 {
+        return EffectivePrimaryAction::SaveBeforeGit { unsaved_count };
+    }
+    let Some(snapshot) = snapshot else {
+        return EffectivePrimaryAction::None;
+    };
+    if snapshot.topology == RepositoryTopology::NoCommit
+        && snapshot.worktree.managed_changes == 0
+        && !snapshot.worktree.has_conflicts
+    {
+        return EffectivePrimaryAction::NoChanges;
+    }
+    EffectivePrimaryAction::Git(recommended_action(snapshot))
 }
 
 fn action_label(action: PrimaryAction) -> &'static str {
@@ -637,71 +699,82 @@ fn worktree_text(worktree: WorktreeState) -> String {
 }
 
 pub(super) fn activate_primary(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
-    if state.borrow().busy {
-        return;
-    }
-    let unsaved_count = unsaved_document_count(state);
-    if unsaved_count > 1 {
-        toast(widgets, "请先保存其他未保存文章，再执行 Git 操作");
-        return;
-    }
-    if has_unsaved_documents(state) {
-        if gtk::prelude::WidgetExt::activate_action(&widgets.window, "win.publish", None).is_err() {
-            show_error(widgets, "无法保存并打开提交窗口");
-        }
-        return;
-    }
-    let Some(snapshot) = state.borrow().git_snapshot.clone() else {
-        refresh(widgets, state);
-        return;
+    let action = {
+        let state = state.borrow();
+        effective_primary_action(
+            state.git_snapshot.as_ref(),
+            state.busy,
+            state.unsaved_documents.len(),
+        )
     };
-    match recommended_action(&snapshot) {
-        PrimaryAction::None => {}
-        PrimaryAction::Initialize => confirm_operation(
-            widgets,
-            state,
-            "初始化 Git 仓库？",
-            "将在项目根目录执行 git init -b main，不会暂存或提交任何文件。",
-            "初始化",
-            Completion::Refresh,
-            |context| git::initialize(&context),
-        ),
-        PrimaryAction::ConfigureIdentity => show_identity_dialog(widgets, state),
-        PrimaryAction::Commit => {
-            if gtk::prelude::WidgetExt::activate_action(&widgets.window, "win.publish", None)
-                .is_err()
-            {
-                show_error(widgets, "无法打开提交窗口");
+    let snapshot = state.borrow().git_snapshot.clone();
+    match action {
+        EffectivePrimaryAction::None => {
+            if snapshot.is_none() {
+                refresh(widgets, state);
             }
         }
-        PrimaryAction::ConfigureRemote => show_remote_dialog(widgets, state, &snapshot),
-        PrimaryAction::PushUpstream => confirm_operation(
-            widgets,
-            state,
-            "首次推送到 origin？",
-            "将执行 git push --set-upstream origin <当前分支>。",
-            "推送",
-            Completion::Refresh,
-            |context| git::push_upstream(&context),
-        ),
-        PrimaryAction::Push => confirm_operation(
-            widgets,
-            state,
-            "推送本地提交？",
-            "只会推送当前分支已有的本地提交，不会自动合并或改写历史。",
-            "推送",
-            Completion::Refresh,
-            |context| git::push(&context),
-        ),
-        PrimaryAction::PullFastForward => confirm_operation(
-            widgets,
-            state,
-            "快进同步远端更新？",
-            "仅执行 git pull --ff-only。若不能纯快进，将保持原状并停止。",
-            "同步",
-            Completion::ReloadProject,
-            |context| git::pull_fast_forward(&context),
-        ),
+        EffectivePrimaryAction::NoChanges => {}
+        EffectivePrimaryAction::SaveBeforeGit { .. } => {
+            drafts::save_all(widgets, state);
+        }
+        EffectivePrimaryAction::Git(action) => {
+            let Some(snapshot) = snapshot else {
+                return;
+            };
+            match action {
+                PrimaryAction::None => {}
+                PrimaryAction::Initialize => confirm_operation(
+                    widgets,
+                    state,
+                    "初始化 Git 仓库？",
+                    "将在项目根目录执行 git init -b main，不会暂存或提交任何文件。",
+                    "初始化",
+                    Completion::Refresh,
+                    |context| git::initialize(&context),
+                ),
+                PrimaryAction::ConfigureIdentity => show_identity_dialog(widgets, state),
+                PrimaryAction::Commit => {
+                    if gtk::prelude::WidgetExt::activate_action(
+                        &widgets.window,
+                        "win.publish",
+                        None,
+                    )
+                    .is_err()
+                    {
+                        show_error(widgets, "无法打开提交窗口");
+                    }
+                }
+                PrimaryAction::ConfigureRemote => show_remote_dialog(widgets, state, &snapshot),
+                PrimaryAction::PushUpstream => confirm_operation(
+                    widgets,
+                    state,
+                    "首次推送到 origin？",
+                    "将执行 git push --set-upstream origin <当前分支>。",
+                    "推送",
+                    Completion::Refresh,
+                    |context| git::push_upstream(&context),
+                ),
+                PrimaryAction::Push => confirm_operation(
+                    widgets,
+                    state,
+                    "推送本地提交？",
+                    "只会推送当前分支已有的本地提交，不会自动合并或改写历史。",
+                    "推送",
+                    Completion::Refresh,
+                    |context| git::push(&context),
+                ),
+                PrimaryAction::PullFastForward => confirm_operation(
+                    widgets,
+                    state,
+                    "快进同步远端更新？",
+                    "仅执行 git pull --ff-only。若不能纯快进，将保持原状并停止。",
+                    "同步",
+                    Completion::ReloadProject,
+                    |context| git::pull_fast_forward(&context),
+                ),
+            }
+        }
     }
 }
 
@@ -1178,9 +1251,11 @@ pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
                 Ok(snapshot) => {
                     widgets.git_panel.apply(&snapshot);
                     state.borrow_mut().git_snapshot = Some(snapshot);
+                    super::sync_controls(&widgets, &state);
                 }
                 Err(error) => {
                     widgets.git_panel.set_error(&error.to_string());
+                    super::sync_controls(&widgets, &state);
                     show_error(&widgets, &format!("刷新 Git 状态失败：{error}"));
                 }
             }
@@ -1394,8 +1469,7 @@ mod tests {
     }
 
     #[test]
-    fn no_commit_without_managed_changes_currently_uses_commit_path() {
-        // 这是当前行为探针，不预先替产品决定“空仓库”最终应该显示什么。
+    fn no_commit_without_managed_changes_has_no_recommended_action() {
         assert_eq!(
             recommended_action(&snapshot(
                 RepositoryTopology::NoCommit,
@@ -1405,14 +1479,12 @@ mod tests {
                 0,
                 0,
             )),
-            PrimaryAction::Commit
+            PrimaryAction::None
         );
     }
 
     #[test]
-    fn no_commit_with_only_unmanaged_changes_currently_uses_commit_path() {
-        // 受管范围为空时，当前推荐动作仍由 NoCommit 分支决定；是否改变它
-        // 留待产品语义确认后再调整。
+    fn no_commit_with_only_unmanaged_changes_has_no_recommended_action() {
         assert_eq!(
             recommended_action(&snapshot(
                 RepositoryTopology::NoCommit,
@@ -1422,7 +1494,71 @@ mod tests {
                 0,
                 0,
             )),
-            PrimaryAction::Commit
+            PrimaryAction::None
+        );
+    }
+
+    #[test]
+    fn effective_action_without_managed_changes_explains_disabled_button() {
+        let snapshot = snapshot(
+            RepositoryTopology::NoCommit,
+            SyncRelation::Unknown,
+            0,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(
+            effective_primary_action(Some(&snapshot), false, 0),
+            EffectivePrimaryAction::NoChanges
+        );
+    }
+
+    #[test]
+    fn unsaved_documents_override_repository_action() {
+        let snapshot = snapshot(
+            RepositoryTopology::Tracking,
+            SyncRelation::Ahead,
+            0,
+            0,
+            1,
+            0,
+        );
+        assert_eq!(
+            effective_primary_action(Some(&snapshot), false, 2),
+            EffectivePrimaryAction::SaveBeforeGit { unsaved_count: 2 }
+        );
+    }
+
+    #[test]
+    fn busy_disables_effective_action_before_other_state() {
+        let snapshot = snapshot(
+            RepositoryTopology::Tracking,
+            SyncRelation::Ahead,
+            0,
+            0,
+            1,
+            0,
+        );
+        assert_eq!(
+            effective_primary_action(Some(&snapshot), true, 2),
+            EffectivePrimaryAction::None
+        );
+    }
+
+    #[test]
+    fn clean_editor_uses_repository_action() {
+        let snapshot = snapshot(
+            RepositoryTopology::Tracking,
+            SyncRelation::Ahead,
+            0,
+            0,
+            1,
+            0,
+        );
+        assert_eq!(
+            effective_primary_action(Some(&snapshot), false, 0),
+            EffectivePrimaryAction::Git(PrimaryAction::Push)
         );
     }
 }

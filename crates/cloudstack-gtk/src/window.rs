@@ -1441,7 +1441,7 @@ struct ControlModel {
     properties_enabled: bool,
     git_project_available: bool,
     git_dirty: bool,
-    git_reflect_enabled: bool,
+    git_primary_action: git_panel::EffectivePrimaryAction,
     post_list_enabled: bool,
     /// 只在没有文章展示时才强制收起 frontmatter 侧栏；文章重新出现时不会
     /// 由这里负责重新展开（那是 toggle-properties 动作自己的事）。
@@ -1469,7 +1469,11 @@ fn controls_for(state: &EditorState) -> ControlModel {
         properties_enabled: has_document && !state.busy,
         git_project_available: has_project,
         git_dirty: state.dirty,
-        git_reflect_enabled: has_project && !state.busy,
+        git_primary_action: git_panel::effective_primary_action(
+            state.git_snapshot.as_ref(),
+            state.busy,
+            state.unsaved_documents.len(),
+        ),
         post_list_enabled: has_project && !state.busy,
         hide_frontmatter_sidebar: !has_document,
     }
@@ -1496,9 +1500,10 @@ fn render_controls(widgets: &Widgets, model: &ControlModel) {
     widgets
         .git_panel
         .set_project_available(model.git_project_available);
+    widgets.git_panel.reflect_unsaved_editor(model.git_dirty);
     widgets
         .git_panel
-        .reflect_unsaved_editor(model.git_dirty, model.git_reflect_enabled);
+        .set_primary_action(model.git_primary_action);
     widgets.post_list.set_sensitive(model.post_list_enabled);
     if model.hide_frontmatter_sidebar {
         widgets.frontmatter_split.set_show_sidebar(false);
@@ -1693,7 +1698,10 @@ mod tests {
         assert!(!model.frontmatter_panel_enabled);
         assert!(!model.properties_enabled);
         assert!(!model.git_project_available);
-        assert!(!model.git_reflect_enabled);
+        assert_eq!(
+            model.git_primary_action,
+            git_panel::EffectivePrimaryAction::None
+        );
         assert!(!model.post_list_enabled);
         assert!(model.hide_frontmatter_sidebar);
     }
@@ -1712,7 +1720,10 @@ mod tests {
         assert!(!model.save_enabled);
         assert!(!model.editor_editable);
         assert!(model.git_project_available);
-        assert!(model.git_reflect_enabled);
+        assert_eq!(
+            model.git_primary_action,
+            git_panel::EffectivePrimaryAction::None
+        );
         assert!(model.post_list_enabled);
         assert!(model.hide_frontmatter_sidebar);
     }
@@ -1769,7 +1780,10 @@ mod tests {
         assert!(!model.editor_editable);
         assert!(!model.frontmatter_panel_enabled);
         assert!(!model.properties_enabled);
-        assert!(!model.git_reflect_enabled);
+        assert_eq!(
+            model.git_primary_action,
+            git_panel::EffectivePrimaryAction::None
+        );
         assert!(!model.post_list_enabled);
         // busy 只挡"会触发新操作"的控件；纯展示性的判断不受它影响。
         assert!(
@@ -1806,6 +1820,10 @@ mod tests {
         assert!(model.editor_editable);
         assert!(model.frontmatter_panel_enabled);
         assert!(model.post_list_enabled);
+        assert_eq!(
+            model.git_primary_action,
+            git_panel::EffectivePrimaryAction::SaveBeforeGit { unsaved_count: 1 }
+        );
     }
 
     #[test]
@@ -1828,6 +1846,9 @@ mod tests {
         assert!(!model.git_dirty, "Git 面板的未保存标记只反映当前文章");
         assert!(model.editor_editable);
         assert!(model.post_list_enabled);
-        assert!(model.git_reflect_enabled);
+        assert_eq!(
+            model.git_primary_action,
+            git_panel::EffectivePrimaryAction::SaveBeforeGit { unsaved_count: 1 }
+        );
     }
 }

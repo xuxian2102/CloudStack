@@ -9,7 +9,7 @@ use cloudstack_core::model::{DraftDocument, PostDocument, ProjectContext};
 use cloudstack_core::services::{drafts, posts};
 use cloudstack_core::AppError;
 
-use super::{set_busy, show_error, sync_controls, EditorState, Widgets};
+use super::{set_busy, show_error, sync_controls, toast, EditorState, Widgets};
 use crate::tasks;
 
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(700);
@@ -116,6 +116,11 @@ enum Operation {
         context: ProjectContext,
         documents: Vec<PostDocument>,
     },
+    SaveAll {
+        storage: DraftStorage,
+        context: ProjectContext,
+        documents: Vec<PostDocument>,
+    },
     DiscardAndClose {
         storage: DraftStorage,
         context: ProjectContext,
@@ -138,7 +143,10 @@ enum Completion {
         post_id: String,
         result: Result<(), AppError>,
     },
-    BatchSaved(BatchSaveReport),
+    BatchSaved {
+        report: BatchSaveReport,
+        close_window: bool,
+    },
     Discarded(DiscardReport),
 }
 
@@ -190,7 +198,18 @@ impl Operation {
                 storage,
                 context,
                 documents,
-            } => Completion::BatchSaved(save_documents(&storage, &context, documents)),
+            } => Completion::BatchSaved {
+                report: save_documents(&storage, &context, documents),
+                close_window: true,
+            },
+            Self::SaveAll {
+                storage,
+                context,
+                documents,
+            } => Completion::BatchSaved {
+                report: save_documents(&storage, &context, documents),
+                close_window: false,
+            },
             Self::DiscardAndClose {
                 storage,
                 context,
@@ -347,6 +366,41 @@ pub(super) fn save_and_close(widgets: &Widgets, state: &Rc<RefCell<EditorState>>
         widgets,
         state,
         Operation::SaveAndClose {
+            storage: draft_storage(),
+            context,
+            documents,
+        },
+    );
+}
+
+/// 保存当前会话中的全部未保存文章，但保留窗口打开。Git 主按钮在有未保存文章
+/// 时调用这个入口，保存完成后按钮会恢复为真正的仓库动作，用户再明确执行一次。
+pub(super) fn save_all(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
+    cancel_timer(state);
+    let (context, mut documents) = {
+        let state = state.borrow();
+        let Some(context) = &state.project else {
+            return;
+        };
+        (
+            context.clone(),
+            state
+                .unsaved_documents
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+    };
+    documents.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    if documents.is_empty() {
+        return;
+    }
+
+    set_busy(widgets, state, true, "正在保存未保存文章…");
+    enqueue(
+        widgets,
+        state,
+        Operation::SaveAll {
             storage: draft_storage(),
             context,
             documents,
@@ -542,7 +596,10 @@ fn handle_completion(
                 }
             }
         }
-        Completion::BatchSaved(report) => return complete_batch_save(widgets, state, report),
+        Completion::BatchSaved {
+            report,
+            close_window,
+        } => return complete_batch_save(widgets, state, report, close_window),
         Completion::Discarded(report) => return complete_discard(widgets, state, report),
     }
     false
@@ -552,6 +609,7 @@ fn complete_batch_save(
     widgets: &Widgets,
     state: &Rc<RefCell<EditorState>>,
     report: BatchSaveReport,
+    close_window: bool,
 ) -> bool {
     let saved_ids = report
         .saved
@@ -604,8 +662,12 @@ fn complete_batch_save(
             log::warn!("{warning}");
         }
         set_busy(widgets, state, false, "");
-        widgets.window.close();
-        return true;
+        if close_window {
+            widgets.window.close();
+            return true;
+        }
+        toast(widgets, "未保存文章已保存，请继续执行 Git 操作");
+        return false;
     }
 
     set_busy(widgets, state, false, "");
