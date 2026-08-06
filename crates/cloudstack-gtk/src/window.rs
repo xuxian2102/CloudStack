@@ -33,6 +33,9 @@ struct EditorState {
     dirty: bool,
     busy: bool,
     document_epoch: u64,
+    /// 每次 mark_document_dirty 自增一次，用来在保存完成时判断保存期间
+    /// buffer 有没有被再次修改。
+    edit_generation: u64,
     draft_queue: drafts::DraftQueue,
     pending_assets: PendingAssetManager,
     git_snapshot: Option<RepositorySnapshot>,
@@ -422,7 +425,11 @@ fn connect_image_paste(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     controller.connect_key_pressed(move |_, key, _, modifiers| {
         let is_paste = modifiers.contains(gdk::ModifierType::CONTROL_MASK)
             && key.to_unicode().is_some_and(|character| character == 'v');
-        if !is_paste || state.borrow().document.is_none() {
+        let paste_blocked = {
+            let state = state.borrow();
+            state.document.is_none() || state.busy
+        };
+        if !is_paste || paste_blocked {
             return glib::Propagation::Proceed;
         }
 
@@ -1223,6 +1230,73 @@ fn document_window_title(relative_path: &str, project_name: Option<&str>, dirty:
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveCompletionOutcome {
+    /// 保存完成时当前显示的已经不是这篇文章（文档/项目已切换），不碰任何状态。
+    NotCurrent,
+    /// 还是这篇文章，保存期间没有新编辑，正常清空 dirty。
+    Clean,
+    /// 还是这篇文章，但保存期间又有新编辑（generation 已推进）：只更新
+    /// revision，dirty/unsaved_documents/draft 都保留，也不 reconcile pending
+    /// 图片（那需要当前正文的真实快照，留给下一次 Clean 保存处理）。
+    RevisionOnly,
+}
+
+fn classify_save_completion(
+    current_document_id: Option<&str>,
+    saved_document_id: &str,
+    current_document_epoch: u64,
+    saved_document_epoch: u64,
+    current_generation: u64,
+    saved_generation: u64,
+) -> SaveCompletionOutcome {
+    if current_document_epoch != saved_document_epoch
+        || current_document_id != Some(saved_document_id)
+    {
+        return SaveCompletionOutcome::NotCurrent;
+    }
+    if current_generation == saved_generation {
+        SaveCompletionOutcome::Clean
+    } else {
+        SaveCompletionOutcome::RevisionOnly
+    }
+}
+
+/// 保存成功后按分类结果落地状态变更。不碰 pending_assets——Clean 时还要做
+/// reconcile，那是会碰磁盘的副作用，留在调用方处理。
+#[allow(clippy::too_many_arguments)]
+fn apply_successful_save(
+    outcome: SaveCompletionOutcome,
+    document: &mut Option<PostDocument>,
+    unsaved_documents: &mut HashMap<String, PostDocument>,
+    dirty: &mut bool,
+    document_id: &str,
+    revision: &str,
+    raw_frontmatter: Option<String>,
+    body: String,
+) {
+    match outcome {
+        SaveCompletionOutcome::NotCurrent => {}
+        SaveCompletionOutcome::Clean => {
+            if let Some(current) = document.as_mut() {
+                current.raw_frontmatter = raw_frontmatter;
+                current.body = body;
+                current.revision = revision.to_owned();
+            }
+            unsaved_documents.remove(document_id);
+            *dirty = false;
+        }
+        SaveCompletionOutcome::RevisionOnly => {
+            if let Some(current) = document.as_mut() {
+                current.revision = revision.to_owned();
+            }
+            if let Some(unsaved) = unsaved_documents.get_mut(document_id) {
+                unsaved.revision = revision.to_owned();
+            }
+        }
+    }
+}
+
 fn save_document(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     save_document_then(widgets, state, None);
 }
@@ -1247,6 +1321,10 @@ fn save_document_then(
     let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
     let raw_frontmatter = document.raw_frontmatter.clone();
     let body = text.to_string();
+    let (saved_document_epoch, saved_generation) = {
+        let state = state.borrow();
+        (state.document_epoch, state.edit_generation)
+    };
     let task_frontmatter = raw_frontmatter.clone();
     let task_body = body.clone();
     let task_context = context.clone();
@@ -1271,15 +1349,32 @@ fn save_document_then(
             let mut continue_after_save = false;
             match result {
                 Ok(revision) => {
-                    let saved_current = {
-                        let mut editor_state = state.borrow_mut();
-                        if !editor_state
+                    let outcome = {
+                        let mut editor_state_ref = state.borrow_mut();
+                        let editor_state: &mut EditorState = &mut editor_state_ref;
+                        let current_id = editor_state
                             .document
                             .as_ref()
-                            .is_some_and(|current| current.id == document.id)
-                        {
-                            false
-                        } else {
+                            .map(|current| current.id.as_str());
+                        let outcome = classify_save_completion(
+                            current_id,
+                            &document.id,
+                            editor_state.document_epoch,
+                            saved_document_epoch,
+                            editor_state.edit_generation,
+                            saved_generation,
+                        );
+                        apply_successful_save(
+                            outcome,
+                            &mut editor_state.document,
+                            &mut editor_state.unsaved_documents,
+                            &mut editor_state.dirty,
+                            &document.id,
+                            &revision,
+                            raw_frontmatter.clone(),
+                            body.clone(),
+                        );
+                        if matches!(outcome, SaveCompletionOutcome::Clean) {
                             if let Err(error) = editor_state.pending_assets.reconcile_saved_post(
                                 &context.root,
                                 &document.id,
@@ -1287,22 +1382,21 @@ fn save_document_then(
                             ) {
                                 log::warn!("保存后清理待提交图片失败：{error}");
                             }
-                            if let Some(current) = editor_state.document.as_mut() {
-                                current.raw_frontmatter = raw_frontmatter;
-                                current.body = body;
-                                current.revision = revision;
-                            }
-                            editor_state.unsaved_documents.remove(&document.id);
-                            editor_state.dirty = false;
-                            true
                         }
+                        outcome
                     };
-                    if saved_current {
-                        update_post_marker(&widgets, &state, &document.id);
-                        widgets.status_label.set_label(&document.relative_path);
-                        toast(&widgets, "文章已保存");
-                        drafts::delete_for_post(&widgets, &state, context, document.id);
-                        continue_after_save = true;
+                    match outcome {
+                        SaveCompletionOutcome::Clean => {
+                            update_post_marker(&widgets, &state, &document.id);
+                            widgets.status_label.set_label(&document.relative_path);
+                            toast(&widgets, "文章已保存");
+                            drafts::delete_for_post(&widgets, &state, context, document.id);
+                            continue_after_save = true;
+                        }
+                        SaveCompletionOutcome::RevisionOnly => {
+                            toast(&widgets, "文章已保存，但编辑器里还有更新的修改未保存");
+                        }
+                        SaveCompletionOutcome::NotCurrent => {}
                     }
                 }
                 Err(error) => show_error(&widgets, &error.to_string()),
@@ -1333,6 +1427,7 @@ fn mark_document_dirty(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
             return;
         };
         state.dirty = true;
+        state.edit_generation = state.edit_generation.wrapping_add(1);
         let mut snapshot = document;
         snapshot.body = body;
         let post_id = snapshot.id.clone();
@@ -1546,5 +1641,136 @@ mod tests {
             document_window_title("nested/post.md", None, false),
             "nested/post.md — 云栈 CloudStack"
         );
+    }
+
+    fn sample_document() -> PostDocument {
+        PostDocument {
+            id: "hello.md".into(),
+            relative_path: "hello.md".into(),
+            raw_frontmatter: Some("title: x".into()),
+            body: "old body".into(),
+            revision: "old-revision".into(),
+        }
+    }
+
+    #[test]
+    fn classify_save_completion_is_not_current_when_document_switched() {
+        assert_eq!(
+            classify_save_completion(Some("other.md"), "hello.md", 1, 1, 5, 5),
+            SaveCompletionOutcome::NotCurrent
+        );
+        assert_eq!(
+            classify_save_completion(None, "hello.md", 1, 1, 5, 5),
+            SaveCompletionOutcome::NotCurrent
+        );
+    }
+
+    #[test]
+    fn classify_save_completion_is_not_current_when_document_epoch_advanced() {
+        assert_eq!(
+            classify_save_completion(Some("hello.md"), "hello.md", 2, 1, 5, 5),
+            SaveCompletionOutcome::NotCurrent
+        );
+    }
+
+    #[test]
+    fn classify_save_completion_is_clean_when_generation_unchanged() {
+        assert_eq!(
+            classify_save_completion(Some("hello.md"), "hello.md", 1, 1, 5, 5),
+            SaveCompletionOutcome::Clean
+        );
+    }
+
+    #[test]
+    fn classify_save_completion_keeps_dirty_when_generation_advanced() {
+        assert_eq!(
+            classify_save_completion(Some("hello.md"), "hello.md", 1, 1, 6, 5),
+            SaveCompletionOutcome::RevisionOnly
+        );
+    }
+
+    #[test]
+    fn apply_successful_save_clean_clears_dirty_and_removes_unsaved_entry() {
+        let mut document = Some(sample_document());
+        let mut unsaved_documents = HashMap::new();
+        unsaved_documents.insert("hello.md".to_string(), sample_document());
+        let mut dirty = true;
+
+        apply_successful_save(
+            SaveCompletionOutcome::Clean,
+            &mut document,
+            &mut unsaved_documents,
+            &mut dirty,
+            "hello.md",
+            "new-revision",
+            Some("title: y".into()),
+            "new body".into(),
+        );
+
+        let document = document.unwrap();
+        assert_eq!(document.revision, "new-revision");
+        assert_eq!(document.body, "new body");
+        assert_eq!(document.raw_frontmatter.as_deref(), Some("title: y"));
+        assert!(!dirty);
+        assert!(!unsaved_documents.contains_key("hello.md"));
+    }
+
+    #[test]
+    fn apply_successful_save_revision_only_syncs_both_revisions_and_keeps_dirty() {
+        let mut document = Some(sample_document());
+        let mut unsaved_documents = HashMap::new();
+        unsaved_documents.insert("hello.md".to_string(), sample_document());
+        let mut dirty = true;
+
+        apply_successful_save(
+            SaveCompletionOutcome::RevisionOnly,
+            &mut document,
+            &mut unsaved_documents,
+            &mut dirty,
+            "hello.md",
+            "new-revision",
+            Some("title: y".into()),
+            "new body".into(),
+        );
+
+        let document = document.unwrap();
+        assert_eq!(document.revision, "new-revision");
+        // body/raw_frontmatter 不应该被这次保存覆盖——buffer 里已经有更新的内容了。
+        assert_eq!(document.body, "old body");
+        assert_eq!(document.raw_frontmatter.as_deref(), Some("title: x"));
+        assert!(dirty, "generation 已推进时不能清空 dirty");
+        let unsaved = unsaved_documents
+            .get("hello.md")
+            .expect("generation 已推进时不能移除 unsaved 条目");
+        assert_eq!(
+            unsaved.revision, "new-revision",
+            "unsaved_documents 里的 revision 也必须跟着更新，否则下一次批量保存会用过期 revision"
+        );
+    }
+
+    #[test]
+    fn apply_successful_save_not_current_touches_nothing() {
+        let mut document = Some(sample_document());
+        let mut unsaved_documents = HashMap::new();
+        unsaved_documents.insert("hello.md".to_string(), sample_document());
+        let mut dirty = true;
+
+        apply_successful_save(
+            SaveCompletionOutcome::NotCurrent,
+            &mut document,
+            &mut unsaved_documents,
+            &mut dirty,
+            "hello.md",
+            "new-revision",
+            Some("title: y".into()),
+            "new body".into(),
+        );
+
+        assert_eq!(document.unwrap().revision, "old-revision");
+        assert_eq!(
+            unsaved_documents.get("hello.md").unwrap().revision,
+            "old-revision"
+        );
+        assert!(dirty);
     }
 }
