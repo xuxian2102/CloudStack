@@ -41,6 +41,9 @@ jobs:
           workspaces: "./ -> target"
           cache-bin: false
 
+      - name: Check localized UI literals
+        run: python3 scripts/check-i18n-hardcoded.py
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 

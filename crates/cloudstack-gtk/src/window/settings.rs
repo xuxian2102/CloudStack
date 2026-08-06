@@ -104,10 +104,8 @@ fn complete_settings_write(widgets: &Widgets, generation: u64, result: Result<()
         };
         writer.complete_write(generation, success)
     });
-    if transition.report_failure {
-        if let Err(error) = &result {
-            toast(widgets, &format!("保存设置失败：{error}"));
-        }
+    if transition.report_failure && result.is_err() {
+        toast(widgets, &i18n::text(UiMessage::SettingsWriteFailed));
     }
     if let Some(next) = transition.next_write {
         dispatch_settings_write(widgets, next);

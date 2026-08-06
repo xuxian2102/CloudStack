@@ -20,12 +20,12 @@ packaging/arch/         Arch VCS 包、desktop entry 和 Wayland 启动器
 
 用户可见文案由 `cloudstack-gtk/src/i18n` 的 `UiMessage` 语义枚举索引，实际翻译存放在
 `cloudstack-gtk/locales/{locale}/main.ftl`，通过 Fluent 在编译期嵌入二进制。首批已迁移保存
-提示、Git 主按钮和设置面板；当前支持 `zh-CN`、`en-US`，按系统语言在启动时选择，无法匹配时
+提示、Git 主按钮、设置面板、草稿/最近项目、资产和 Git 操作错误；当前支持 `zh-CN`、`en-US`，按系统语言在启动时选择，无法匹配时
 回退到显式的 `en-US`。语言切换暂不在运行时刷新，修改后重启应用生效。
 
-`cloudstack-core` 继续返回结构化错误和诊断数据，不负责翻译；错误到用户消息的映射将在后续
-迁移错误提示时补齐。测试会解析两个 catalog，检查语法、key 集合、变量集合和所有
-`UiMessage` 词条，避免单个语言缺少消息时被 loader 的 fallback 掩盖。
+`cloudstack-core` 继续返回结构化错误和诊断数据，不负责翻译。测试会解析两个 catalog，检查语法、key 集合、变量集合和所有 `UiMessage` 词条，避免单个语言缺少消息时被 loader 的 fallback 掩盖。`UserFacingError` 将主提示与原始诊断分开：主提示进入 Fluent，诊断只进入日志或 Git 执行记录。
+
+CI 通过 `scripts/check-i18n-hardcoded.py` 扫描 GTK 高信号用户可见入口（标题、标签、占位符、tooltip、toast 和错误提示），阻止新的硬编码文案。符号、示例值等例外使用显式允许表或同一行的 `i18n-allow:` 原因；动态状态、命令、路径和测试夹具仍由正常代码审查负责。
 
 ## 文档状态与写入
 

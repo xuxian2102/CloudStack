@@ -47,6 +47,7 @@ pub(crate) enum UiMessage {
     SettingsOpenProjectGroup,
     SettingsGeneralPage,
     SettingsDialogTitle,
+    SettingsWriteFailed,
     AppName,
     OpenProjectTooltip,
     CloseProjectTooltip,
@@ -63,6 +64,17 @@ pub(crate) enum UiMessage {
     ReadyStatus,
     ProjectOpenedStatus {
         count: usize,
+    },
+    ProjectScanningStatus,
+    ArticleOpeningStatus,
+    SavingStatus,
+    UnsavedProjectSwitch,
+    ErrorOpenDirectory,
+    DocumentStatus {
+        path: String,
+    },
+    DocumentUnsavedStatus {
+        path: String,
     },
     WindowTitle {
         folder: String,
@@ -481,6 +493,7 @@ impl UiMessage {
             Self::SettingsOpenProjectGroup => "settings-open-project-group",
             Self::SettingsGeneralPage => "settings-general-page",
             Self::SettingsDialogTitle => "settings-dialog-title",
+            Self::SettingsWriteFailed => "settings-write-failed",
             Self::AppName => "app-name",
             Self::OpenProjectTooltip => "open-project-tooltip",
             Self::CloseProjectTooltip => "close-project-tooltip",
@@ -496,6 +509,13 @@ impl UiMessage {
             Self::InitialEditorText => "initial-editor-text",
             Self::ReadyStatus => "ready-status",
             Self::ProjectOpenedStatus { .. } => "project-opened-status",
+            Self::ProjectScanningStatus => "project-scanning-status",
+            Self::ArticleOpeningStatus => "article-opening-status",
+            Self::SavingStatus => "saving-status",
+            Self::UnsavedProjectSwitch => "unsaved-project-switch",
+            Self::ErrorOpenDirectory => "error-open-directory",
+            Self::DocumentStatus { .. } => "document-status",
+            Self::DocumentUnsavedStatus { .. } => "document-unsaved-status",
             Self::WindowTitle { .. } => "window-title",
             Self::WelcomeOpenProjectLabel => "welcome-open-project-label",
             Self::WelcomeOpenProjectTooltip => "welcome-open-project-tooltip",
@@ -775,6 +795,9 @@ impl UiMessage {
             Self::WindowTitle { folder } => {
                 HashMap::from([(Cow::Borrowed("folder"), FluentValue::from(folder.clone()))])
             }
+            Self::DocumentStatus { path } | Self::DocumentUnsavedStatus { path } => {
+                HashMap::from([(Cow::Borrowed("path"), FluentValue::from(path.clone()))])
+            }
             Self::CreateArticleDefaultName { extension }
             | Self::CreateArticlePlaceholder { extension } => HashMap::from([(
                 Cow::Borrowed("extension"),
@@ -974,6 +997,7 @@ pub(crate) fn message_samples() -> Vec<UiMessage> {
         UiMessage::SettingsOpenProjectGroup,
         UiMessage::SettingsGeneralPage,
         UiMessage::SettingsDialogTitle,
+        UiMessage::SettingsWriteFailed,
         UiMessage::AppName,
         UiMessage::OpenProjectTooltip,
         UiMessage::CloseProjectTooltip,
@@ -989,6 +1013,17 @@ pub(crate) fn message_samples() -> Vec<UiMessage> {
         UiMessage::InitialEditorText,
         UiMessage::ReadyStatus,
         UiMessage::ProjectOpenedStatus { count: 2 },
+        UiMessage::ProjectScanningStatus,
+        UiMessage::ArticleOpeningStatus,
+        UiMessage::SavingStatus,
+        UiMessage::UnsavedProjectSwitch,
+        UiMessage::ErrorOpenDirectory,
+        UiMessage::DocumentStatus {
+            path: "notes/example.md".to_owned(),
+        },
+        UiMessage::DocumentUnsavedStatus {
+            path: "notes/example.md".to_owned(),
+        },
         UiMessage::WindowTitle {
             folder: "example".to_owned(),
         },

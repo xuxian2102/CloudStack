@@ -6,7 +6,7 @@ use cloudstack_core::services::posts;
 
 use super::{
     display_document, drafts, git_panel, has_unsaved_documents, populate_post_list, set_busy,
-    show_error, toast, EditorState, Widgets,
+    show_error, show_user_facing_error, toast, EditorState, Widgets,
 };
 use crate::i18n::{self, UiMessage};
 use crate::tasks;
@@ -280,7 +280,7 @@ fn delete_post(
                         .set_title(Some(&i18n::text(UiMessage::AppName)));
                     toast(&widgets, &i18n::text(UiMessage::ArticleDeleted));
                 }
-                Err(error) => show_error(&widgets, &error.to_string()),
+                Err(error) => show_user_facing_error(&widgets, &error),
             }
             set_busy(&widgets, &state, false, "");
             git_panel::refresh(&widgets, &state);

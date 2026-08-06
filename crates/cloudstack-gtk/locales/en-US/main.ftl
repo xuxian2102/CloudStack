@@ -46,6 +46,7 @@ settings-appearance-group = Appearance
 settings-open-project-group = Open project
 settings-general-page = General
 settings-dialog-title = Settings
+settings-write-failed = Could not save settings; you can retry later
 
 app-name = CloudStack
 open-project-tooltip = Open project folder (Ctrl+O)
@@ -64,6 +65,13 @@ initial-editor-text = Open a folder to start editing.
     If the folder has no CloudStack configuration, the app will guide you through creating a basic project.
 ready-status = Ready
 project-opened-status = Project open · { $count } articles
+project-scanning-status = Scanning project…
+article-opening-status = Opening article…
+saving-status = Saving…
+unsaved-project-switch = This project has unsaved articles; save them before switching projects
+error-open-directory = Could not open the directory
+document-status = { $path }
+document-unsaved-status = { $path } · Unsaved
 window-title = CloudStack — { $folder }
 
 welcome-open-project-label = Open project folder

@@ -38,6 +38,7 @@ settings-appearance-group = 外观
 settings-open-project-group = 打开项目
 settings-general-page = 通用
 settings-dialog-title = 设置
+settings-write-failed = 设置保存失败，稍后可以重试
 
 app-name = 云栈 CloudStack
 open-project-tooltip = 打开项目文件夹 (Ctrl+O)
@@ -56,6 +57,13 @@ initial-editor-text = 打开一个文件夹以开始编辑。
     如果还没有 CloudStack 配置，应用会引导你创建基本项目。
 ready-status = 就绪
 project-opened-status = 已打开项目 · { $count } 篇文章
+project-scanning-status = 正在扫描项目…
+article-opening-status = 正在打开文章…
+saving-status = 正在保存…
+unsaved-project-switch = 当前项目有未保存文章，请先保存后再切换项目
+error-open-directory = 无法打开目录
+document-status = { $path }
+document-unsaved-status = { $path } · 未保存
 window-title = 云栈 CloudStack — { $folder }
 
 welcome-open-project-label = 打开项目文件夹

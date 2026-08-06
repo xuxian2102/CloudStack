@@ -551,7 +551,7 @@ fn pump(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
                     if closes_window {
                         set_busy(&widgets, &state, false, "");
                     }
-                    show_error(&widgets, &error.to_string());
+                    super::show_user_facing_error(&widgets, &error);
                 }
             }
             pump(&widgets, &state);

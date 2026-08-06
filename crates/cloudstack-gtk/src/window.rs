@@ -566,11 +566,19 @@ fn connect_actions(
         }
         let unsaved_count = unsaved_document_count(&publish_state);
         if unsaved_count > 1 {
-            toast(&publish_widgets, "请先保存其他未保存文章，再执行 Git 发布");
+            toast(
+                &publish_widgets,
+                &i18n::text(UiMessage::GitSaveBeforeAction {
+                    count: unsaved_count,
+                }),
+            );
             return;
         }
         if unsaved_count == 1 && !publish_state.borrow().dirty {
-            toast(&publish_widgets, "请先保存未保存文章，再执行 Git 发布");
+            toast(
+                &publish_widgets,
+                &i18n::text(UiMessage::GitSaveBeforeAction { count: 1 }),
+            );
             return;
         }
         if publish_state.borrow().dirty {
@@ -703,7 +711,7 @@ fn ensure_no_unsaved_documents(widgets: &Widgets, state: &Rc<RefCell<EditorState
     }
     if !state_snapshot.unsaved_documents.is_empty() {
         drop(state_snapshot);
-        toast(widgets, "当前项目有未保存文章，请先保存后再切换项目");
+        toast(widgets, &i18n::text(UiMessage::UnsavedProjectSwitch));
         return false;
     }
     true
@@ -751,7 +759,10 @@ fn select_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
                 open_project(&widgets, &state, &path);
             }
             Err(error) if error.matches(gtk::DialogError::Dismissed) => {}
-            Err(error) => show_error(&widgets, &format!("打开目录失败：{error}")),
+            Err(error) => show_user_facing(
+                &widgets,
+                i18n::user_facing_message(UiMessage::ErrorOpenDirectory, error.to_string()),
+            ),
         },
     );
 }
@@ -798,7 +809,8 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
     if state.borrow().busy {
         return;
     }
-    set_busy(widgets, state, true, "正在扫描项目…");
+    let scanning_status = i18n::text(UiMessage::ProjectScanningStatus);
+    set_busy(widgets, state, true, &scanning_status);
     let path = path.to_owned();
     let widgets = widgets.clone();
     let state = Rc::clone(state);
@@ -1192,7 +1204,8 @@ fn load_document(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, post_id: &
         display_document(widgets, state, document, true);
         return;
     }
-    set_busy(widgets, state, true, "正在打开文章…");
+    let opening_status = i18n::text(UiMessage::ArticleOpeningStatus);
+    set_busy(widgets, state, true, &opening_status);
     let post_id = post_id.to_owned();
     let recovery_context = context.clone();
     let widgets = widgets.clone();
@@ -1211,7 +1224,7 @@ fn load_document(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, post_id: &
                         epoch,
                     );
                 }
-                Err(error) => show_error(&widgets, &error.to_string()),
+                Err(error) => show_user_facing_error(&widgets, &error),
             }
             set_busy(&widgets, &state, false, "");
         },
@@ -1322,7 +1335,8 @@ fn save_document_then(
     // 先把最新编辑快照排入草稿队列。保存成功后的删除也进入同一队列，
     // 因而不会被较早启动的自动草稿写入反超。
     drafts::flush_current(widgets, state);
-    set_busy(widgets, state, true, "正在保存…");
+    let saving_status = i18n::text(UiMessage::SavingStatus);
+    set_busy(widgets, state, true, &saving_status);
     let widgets = widgets.clone();
     let state = Rc::clone(state);
     tasks::run(
@@ -1429,7 +1443,9 @@ fn mark_document_dirty(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     if let Some(document) = &state.borrow().document {
         widgets
             .status_label
-            .set_label(&format!("{} · 未保存", document.relative_path));
+            .set_label(&i18n::text(UiMessage::DocumentUnsavedStatus {
+                path: document.relative_path.clone(),
+            }));
     }
     drafts::schedule(widgets, state);
 }
@@ -1441,14 +1457,16 @@ fn set_busy(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, busy: bool, mes
     } else if !busy {
         let editor_state = state.borrow();
         if let Some(document) = &editor_state.document {
-            let suffix = if editor_state.dirty {
-                " · 未保存"
+            let status = if editor_state.dirty {
+                i18n::text(UiMessage::DocumentUnsavedStatus {
+                    path: document.relative_path.clone(),
+                })
             } else {
-                ""
+                i18n::text(UiMessage::DocumentStatus {
+                    path: document.relative_path.clone(),
+                })
             };
-            widgets
-                .status_label
-                .set_label(&format!("{}{suffix}", document.relative_path));
+            widgets.status_label.set_label(&status);
         } else if editor_state.project.is_some() {
             widgets
                 .status_label

@@ -915,7 +915,7 @@ fn show_identity_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
         .placeholder_text(i18n::text(UiMessage::GitIdentityPlaceholder))
         .build();
     let email_entry = gtk::Entry::builder()
-        .placeholder_text("name@example.com")
+        .placeholder_text("name@example.com") // i18n-allow: example value
         .build();
     let save_button = gtk::Button::builder()
         .label(i18n::text(UiMessage::GitIdentitySave))

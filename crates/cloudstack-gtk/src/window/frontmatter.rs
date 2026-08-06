@@ -482,7 +482,7 @@ fn update_field(
             }
             mark_document_dirty(widgets, state);
         }
-        Err(error) => super::show_error(widgets, &error.to_string()),
+        Err(error) => super::show_user_facing_error(widgets, &error),
     }
 }
 
