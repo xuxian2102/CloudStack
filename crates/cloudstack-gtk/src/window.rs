@@ -4,6 +4,7 @@ mod frontmatter;
 mod git_panel;
 mod publish;
 mod recent;
+mod settings;
 mod welcome;
 
 use std::cell::RefCell;
@@ -97,6 +98,8 @@ pub fn present(application: &adw::Application) {
     connect_post_list(&widgets, &state);
     connect_close_guard(&widgets, &state);
     recent::load_async(&widgets, &state);
+    settings::load_and_apply_async();
+    recent::maybe_reopen_last_project(&widgets, &state);
 
     #[cfg(feature = "e2e")]
     if let Some(root) = std::env::var_os("CLOUDSTACK_E2E_PROJECT") {
@@ -150,11 +153,17 @@ fn build_window(application: &adw::Application) -> Widgets {
         .ellipsize(gtk::pango::EllipsizeMode::Middle)
         .max_width_chars(48)
         .build();
+    let settings_button = gtk::Button::builder()
+        .icon_name("preferences-system-symbolic")
+        .tooltip_text("设置")
+        .action_name("win.open-settings")
+        .build();
 
     let header = adw::HeaderBar::new();
     header.pack_start(&open_button);
     header.pack_start(&home_button);
     header.pack_start(&project_label);
+    header.pack_end(&settings_button);
     header.pack_end(&properties_button);
     header.pack_end(&save_button);
 
@@ -512,6 +521,11 @@ fn connect_actions(
     open_action.connect_activate(move |_, _| select_project(&open_widgets, &open_state));
     widgets.window.add_action(&open_action);
 
+    let settings_action = gio::SimpleAction::new("open-settings", None);
+    let settings_widgets = widgets.clone();
+    settings_action.connect_activate(move |_, _| settings::show_dialog(&settings_widgets));
+    widgets.window.add_action(&settings_action);
+
     let close_project_action = gio::SimpleAction::new("close-project", None);
     let close_widgets = widgets.clone();
     let close_state = Rc::clone(state);
@@ -836,6 +850,7 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
                         .set_title(Some(&format!("云栈 CloudStack — {folder_name}")));
                     widgets.content_stack.set_visible_child_name("workspace");
                     recent::touch(&root_for_recent);
+                    recent::maybe_reopen_last_document(&widgets, &state, root_for_recent.clone());
                     frontmatter::refresh(&widgets, &state);
                     git_panel::refresh(&widgets, &state);
                 }
@@ -1197,6 +1212,7 @@ fn display_document(
     let title = document_window_title(&document.relative_path, project_name.as_deref(), dirty);
     widgets.window.set_title(Some(&title));
     if let Some(context) = context {
+        recent::touch_last_document(&context.root, &document.id);
         widgets
             .preview
             .set_document(context, document.id.clone(), epoch, document.body.clone());
@@ -1590,6 +1606,16 @@ fn connect_close_guard(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
         dialog.present(Some(&widgets.window));
         glib::Propagation::Stop
     });
+}
+
+/// `recent`/`settings` 子模块共用的应用数据目录解析——不含 legacy 目录回退，
+/// 两者都是全新功能，没有旧版本数据要迁移。
+fn app_data_dir() -> PathBuf {
+    #[cfg(feature = "e2e")]
+    if let Some(path) = std::env::var_os("CLOUDSTACK_E2E_DATA_DIR") {
+        return PathBuf::from(path);
+    }
+    gtk::glib::user_data_dir().join(crate::APPLICATION_ID)
 }
 
 fn toast(widgets: &Widgets, message: &str) {

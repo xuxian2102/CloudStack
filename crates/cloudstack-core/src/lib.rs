@@ -16,6 +16,7 @@ pub mod services {
     pub mod posts;
     pub mod project;
     pub mod recent;
+    pub mod settings;
 }
 
 pub use error::AppError;

@@ -24,6 +24,8 @@ pub struct RecentProject {
     pub last_opened_ms: u64,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default)]
+    pub last_document_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -142,9 +144,9 @@ pub fn touch(app_data_dir: &Path, project_root: &Path) -> Result<Vec<RecentProje
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
     let mut projects = read_file(app_data_dir);
-    let was_pinned = projects
-        .iter()
-        .any(|entry| entry.root == project_root && entry.pinned);
+    let existing = projects.iter().find(|entry| entry.root == project_root);
+    let was_pinned = existing.is_some_and(|entry| entry.pinned);
+    let last_document_id = existing.and_then(|entry| entry.last_document_id.clone());
     projects.retain(|entry| entry.root != project_root);
     projects.insert(
         0,
@@ -152,6 +154,7 @@ pub fn touch(app_data_dir: &Path, project_root: &Path) -> Result<Vec<RecentProje
             root: project_root.to_path_buf(),
             last_opened_ms: now_ms(),
             pinned: was_pinned,
+            last_document_id,
         },
     );
     write_atomic(app_data_dir, projects)
@@ -182,6 +185,33 @@ pub fn set_pinned(
         if entry.root == project_root {
             entry.pinned = pinned;
         }
+    }
+    write_atomic(app_data_dir, projects)
+}
+
+/// 记录这个项目最后展示过的文章。记录不存在就直接新建一条（不要求 touch()
+/// 一定先跑完——项目刚打开、touch() 的写入还没落盘时就可能先触发一次文章
+/// 展示）。
+pub fn set_last_document(
+    app_data_dir: &Path,
+    project_root: &Path,
+    document_id: &str,
+) -> Result<Vec<RecentProject>, AppError> {
+    let _guard = RECENT_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let mut projects = read_file(app_data_dir);
+    match projects.iter_mut().find(|entry| entry.root == project_root) {
+        Some(entry) => entry.last_document_id = Some(document_id.to_owned()),
+        None => projects.insert(
+            0,
+            RecentProject {
+                root: project_root.to_path_buf(),
+                last_opened_ms: now_ms(),
+                pinned: false,
+                last_document_id: Some(document_id.to_owned()),
+            },
+        ),
     }
     write_atomic(app_data_dir, projects)
 }
@@ -343,5 +373,31 @@ mod tests {
         let projects = load(app_data.path()).unwrap();
         assert_eq!(projects.len(), pin_count);
         assert!(projects.iter().all(|p| p.pinned));
+    }
+
+    #[test]
+    fn touch_preserves_last_document_id_across_reopen() {
+        let app_data = tempfile::tempdir().unwrap();
+        touch(app_data.path(), &root("a")).unwrap();
+        set_last_document(app_data.path(), &root("a"), "hello.md").unwrap();
+        let projects = touch(app_data.path(), &root("a")).unwrap();
+        assert_eq!(projects[0].last_document_id.as_deref(), Some("hello.md"));
+    }
+
+    #[test]
+    fn set_last_document_records_the_document_id() {
+        let app_data = tempfile::tempdir().unwrap();
+        touch(app_data.path(), &root("a")).unwrap();
+        let projects = set_last_document(app_data.path(), &root("a"), "hello.md").unwrap();
+        assert_eq!(projects[0].last_document_id.as_deref(), Some("hello.md"));
+    }
+
+    #[test]
+    fn set_last_document_upserts_missing_project() {
+        let app_data = tempfile::tempdir().unwrap();
+        let projects = set_last_document(app_data.path(), &root("a"), "hello.md").unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].root, root("a"));
+        assert_eq!(projects[0].last_document_id.as_deref(), Some("hello.md"));
     }
 }
