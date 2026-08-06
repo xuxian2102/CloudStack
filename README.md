@@ -15,7 +15,7 @@
 </p>
 
 云栈（CloudStack）是一个只面向 **Arch Linux rolling + 原生 Wayland** 的个人 Markdown
-编辑器。当前版本 `v0.2.3` 使用纯 Rust、GTK4、libadwaita、GtkSourceView 5 和
+编辑器。当前版本 `v0.2.4` 使用纯 Rust、GTK4、libadwaita、GtkSourceView 5 和
 WebKitGTK 6，不再包含 Tauri、React、Node.js 或 Vite 构建链。
 
 早期 Tauri 版本及其历史保留在

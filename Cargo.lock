@@ -176,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "cloudstack-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "chrono",
  "github-slugger",
@@ -197,7 +197,7 @@ dependencies = [
 
 [[package]]
 name = "cloudstack-gtk"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "cloudstack-core",
  "cloudstack-renderer",
@@ -215,7 +215,7 @@ dependencies = [
 
 [[package]]
 name = "cloudstack-renderer"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "cloudstack-core",
  "katex-rs",
