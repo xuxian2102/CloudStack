@@ -16,7 +16,8 @@ use adw::prelude::*;
 use cloudstack_core::error::AppError;
 use cloudstack_core::model::{PostDocument, PostSummary, ProjectContext, RepositorySnapshot};
 use cloudstack_core::services::assets::PendingAssetManager;
-use cloudstack_core::services::{assets, git, posts, project};
+use cloudstack_core::services::operations::RecoveredRename;
+use cloudstack_core::services::{assets, git, operations, posts, project};
 use gtk::{gdk, gio, glib};
 use sourceview::prelude::*;
 
@@ -43,12 +44,14 @@ struct EditorState {
     draft_queue: drafts::DraftQueue,
     pending_assets: PendingAssetManager,
     git_snapshot: Option<RepositorySnapshot>,
+    /// 每次触发 Git 状态刷新时自增，防止后台线程池乱序完成时旧请求覆盖新状态。
+    git_refresh_generation: u64,
     /// 当前会话中已修改但尚未写回磁盘的文章快照。允许切换文章时保留编辑内容。
     unsaved_documents: HashMap<String, PostDocument>,
 }
 
 enum OpenProjectOutcome {
-    Opened(ProjectContext, Vec<PostSummary>),
+    Opened(ProjectContext, Vec<PostSummary>, Vec<RecoveredRename>),
     NeedsInitialization {
         root: PathBuf,
         suggested_content_dir: String,
@@ -820,8 +823,15 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
                 // CloudStack 配置是编辑器本地状态；对独立 Git 项目自动写入
                 // repository-local exclude，避免第一次打开就把配置列为待提交文件。
                 let _ = git::ensure_local_config_excluded(&context);
+                // 必须在列出文章之前恢复：上次意外退出可能留下了半完成的重命名，
+                // 不先把它续完，文章列表可能同时看到消失的旧 id 和还没出现的新 id。
+                let recovered = operations::recover_pending_renames(&app_data_dir(), &context);
                 let post_summaries = posts::list_posts(&context)?;
-                Ok(OpenProjectOutcome::Opened(context, post_summaries))
+                Ok(OpenProjectOutcome::Opened(
+                    context,
+                    post_summaries,
+                    recovered,
+                ))
             }
             Err(cloudstack_core::error::AppError::MissingProjectConfig) => {
                 let suggested_content_dir = project::suggest_content_dir(&path)?;
@@ -842,7 +852,7 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
             let mut initialization = None;
             let mut content_repair = None;
             match result {
-                Ok(OpenProjectOutcome::Opened(context, post_summaries)) => {
+                Ok(OpenProjectOutcome::Opened(context, post_summaries, recovered)) => {
                     let root_for_recent = context.root.clone();
                     widgets
                         .project_label
@@ -886,6 +896,14 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
                     recent::maybe_reopen_last_document(&widgets, &state, root_for_recent.clone());
                     frontmatter::refresh(&widgets, &state);
                     git_panel::refresh(&widgets, &state);
+                    if !recovered.is_empty() {
+                        toast(
+                            &widgets,
+                            &i18n::text(UiMessage::ArticleRenameRecovered {
+                                count: recovered.len(),
+                            }),
+                        );
+                    }
                 }
                 Ok(OpenProjectOutcome::NeedsInitialization {
                     root,

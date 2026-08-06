@@ -47,36 +47,38 @@ pub(crate) fn git_error(error: &AppError) -> UserFacingError {
         _ => "",
     };
     let normalized = detail.to_ascii_lowercase();
-    let message = if detail.contains("项目尚未初始化") || detail.contains("不是 git 仓库")
-    {
-        UiMessage::GitErrorRepositoryNotInitialized
-    } else if detail.contains("没有配置 origin")
-        || detail.contains("没有可获取的远端")
-        || detail.contains("远端地址")
-    {
-        UiMessage::GitErrorNoRemote
-    } else if detail.contains("没有 upstream") || detail.contains("上游") {
-        UiMessage::GitErrorNoUpstream
-    } else if detail.contains("未安装 GitHub CLI") {
-        UiMessage::GitGhMissing
-    } else if detail.contains("gh 尚未登录") || detail.contains("尚未登录") {
-        UiMessage::GitGhNotAuthenticated
-    } else if detail.contains("认证")
-        || detail.contains("凭据")
-        || detail.contains("SSH key")
-        || normalized.contains("authentication")
-        || normalized.contains("publickey")
-    {
-        UiMessage::GitErrorAuthentication
-    } else if detail.contains("超时") || normalized.contains("timed out") {
-        UiMessage::GitErrorTimeout
-    } else if detail.contains("冲突") || detail.contains("分叉") {
-        UiMessage::GitErrorConflict
-    } else if detail.contains("远端包含本地没有") || normalized.contains("rejected") {
-        UiMessage::GitErrorPushRejected
-    } else {
-        UiMessage::GitErrorOperation
-    };
+    let message =
+        if detail.contains(cloudstack_core::services::git::UNSUPPORTED_PATH_ENCODING_ERROR) {
+            UiMessage::GitErrorUnsupportedPathEncoding
+        } else if detail.contains("项目尚未初始化") || detail.contains("不是 git 仓库") {
+            UiMessage::GitErrorRepositoryNotInitialized
+        } else if detail.contains("没有配置 origin")
+            || detail.contains("没有可获取的远端")
+            || detail.contains("远端地址")
+        {
+            UiMessage::GitErrorNoRemote
+        } else if detail.contains("没有 upstream") || detail.contains("上游") {
+            UiMessage::GitErrorNoUpstream
+        } else if detail.contains("未安装 GitHub CLI") {
+            UiMessage::GitGhMissing
+        } else if detail.contains("gh 尚未登录") || detail.contains("尚未登录") {
+            UiMessage::GitGhNotAuthenticated
+        } else if detail.contains("认证")
+            || detail.contains("凭据")
+            || detail.contains("SSH key")
+            || normalized.contains("authentication")
+            || normalized.contains("publickey")
+        {
+            UiMessage::GitErrorAuthentication
+        } else if detail.contains("超时") || normalized.contains("timed out") {
+            UiMessage::GitErrorTimeout
+        } else if detail.contains("冲突") || detail.contains("分叉") {
+            UiMessage::GitErrorConflict
+        } else if detail.contains("远端包含本地没有") || normalized.contains("rejected") {
+            UiMessage::GitErrorPushRejected
+        } else {
+            UiMessage::GitErrorOperation
+        };
     user_facing_message(message, error.to_string())
 }
 
@@ -202,5 +204,13 @@ mod tests {
             git_error(&AppError::Git("未安装 GitHub CLI（gh）".to_owned())).message,
             UiMessage::GitGhMissing
         );
+    }
+
+    #[test]
+    fn git_unsupported_path_encoding_gets_its_own_actionable_message() {
+        let mapped = git_error(&AppError::Git(
+            cloudstack_core::services::git::UNSUPPORTED_PATH_ENCODING_ERROR.to_owned(),
+        ));
+        assert_eq!(mapped.message, UiMessage::GitErrorUnsupportedPathEncoding);
     }
 }

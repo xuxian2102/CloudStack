@@ -495,12 +495,13 @@ fn register_resource_scheme(
             return;
         };
         let markdown_path = markdown_path.to_string();
-        let content_type = image_content_type(&markdown_path);
         let request = request.clone();
         tasks::run(
             move || assets::read_image_asset(&target.context, &target.post_id, &markdown_path),
             move |result| match result {
-                Ok(bytes) => finish_bytes(&request, bytes, content_type),
+                // content_type 来自读取时对实际字节内容的嗅探，不是从 URL 后缀猜的——
+                // 文件名后缀和真实内容不一致时也能返回正确的 Content-Type。
+                Ok(image) => finish_bytes(&request, image.bytes, image.content_type),
                 Err(error) => finish_error(
                     &request,
                     gio::IOErrorEnum::NotFound,
@@ -509,28 +510,6 @@ fn register_resource_scheme(
             },
         );
     });
-}
-
-fn image_content_type(path: &str) -> &'static str {
-    let path = path.split(['?', '#']).next().unwrap_or(path);
-    match std::path::Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "avif" => "image/avif",
-        "bmp" => "image/bmp",
-        "tif" | "tiff" => "image/tiff",
-        "ico" => "image/x-icon",
-        "svg" => "image/svg+xml",
-        _ => "application/octet-stream",
-    }
 }
 
 fn finish_bytes(request: &webkit::URISchemeRequest, bytes: Vec<u8>, content_type: &str) {
@@ -772,12 +751,6 @@ mod tests {
         assert_eq!(debounce_duration(10), Duration::from_millis(200));
         assert_eq!(debounce_duration(101 * 1024), Duration::from_millis(350));
         assert_eq!(debounce_duration(501 * 1024), Duration::from_millis(500));
-    }
-
-    #[test]
-    fn image_mime_type_is_determined_without_query_or_fragment() {
-        assert_eq!(image_content_type("Photo/a.png?x=1"), "image/png");
-        assert_eq!(image_content_type("Photo/a.SVG#icon"), "image/svg+xml");
     }
 
     #[test]

@@ -1,10 +1,11 @@
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use percent_encoding::percent_decode_str;
 use pulldown_cmark::{Event, Tag};
+use sha2::{Digest, Sha256};
 
 use crate::error::AppError;
 use crate::model::{AssetMode, ProjectContext, SavedImage};
@@ -207,12 +208,98 @@ fn unique_filename(dir: &Path, desired: &str) -> String {
     unreachable!("dir 里不可能有无限多个同名候选文件")
 }
 
-/// 剪贴板粘贴没有文件名，只能从字节内容猜扩展名。infer 只看文件签名，不解码图片，
-/// 同时覆盖 PNG/JPEG/GIF/WebP 之外的 BMP/AVIF/TIFF/ICO 等常见格式。
-fn sniff_image_extension(bytes: &[u8]) -> Option<&'static str> {
-    infer::get(bytes)
-        .filter(|kind| kind.mime_type().starts_with("image/"))
-        .map(|kind| kind.extension())
+/// 候选文件名的扩展名跟识别出的内容格式对不上时改写成规范扩展名；已经匹配
+/// （包括 `jpg`/`jpeg`、`tif`/`tiff` 这类等价拼法）就保留用户原始写法。
+fn reconcile_extension(name: &str, format: SupportedImageFormat) -> String {
+    let path = Path::new(name);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+    let matches = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| format.matches_extension(extension));
+    if matches {
+        name.to_owned()
+    } else {
+        format!("{stem}.{}", format.canonical_extension())
+    }
+}
+
+/// CloudStack 保存和预览都认识的图片格式清单——导入、预览、GTK 资源协议的
+/// content-type 都从这一份枚举派生，不再各自维护一份扩展名列表。
+///
+/// 有意不用 `infer::get(..).mime_type().starts_with("image/")` 这种前缀匹配：
+/// `infer` 认识的 "image/*" 里还包含 PSD、CR2、HEIF、JXL 等 CloudStack 从来
+/// 不能预览的格式，前缀匹配会让这些字节被当作"是图片"接受下来，存成一个自己
+/// 永远打不开的文件。这里逐个列出 CloudStack 实际支持渲染的格式。
+///
+/// 不支持 SVG：SVG 是 XML 文档而不是二进制图片，`infer` 没有固定魔数可以嗅探，
+/// 只能靠字符串搜索 `<svg` 这种不可靠的手段“认出”它，验证强度和其余格式的签名
+/// 校验不在一个量级。以后如果要重新支持，推荐落地时用受控渲染器直接栅格化成
+/// PNG/WebP 存下来，而不是长期保留一个活体 SVG 解析/渲染的攻击面。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupportedImageFormat {
+    Png,
+    Jpeg,
+    Gif,
+    WebP,
+    Avif,
+    Bmp,
+    Tiff,
+    Ico,
+}
+
+impl SupportedImageFormat {
+    /// 只看文件签名，不解码图片内容。
+    fn sniff(bytes: &[u8]) -> Option<Self> {
+        match infer::get(bytes)?.mime_type() {
+            "image/png" => Some(Self::Png),
+            "image/jpeg" => Some(Self::Jpeg),
+            "image/gif" => Some(Self::Gif),
+            "image/webp" => Some(Self::WebP),
+            "image/avif" => Some(Self::Avif),
+            "image/bmp" => Some(Self::Bmp),
+            "image/tiff" => Some(Self::Tiff),
+            "image/vnd.microsoft.icon" => Some(Self::Ico),
+            _ => None,
+        }
+    }
+
+    fn canonical_extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+            Self::Gif => "gif",
+            Self::WebP => "webp",
+            Self::Avif => "avif",
+            Self::Bmp => "bmp",
+            Self::Tiff => "tif",
+            Self::Ico => "ico",
+        }
+    }
+
+    /// 同一格式常见的多种拼法（`jpg`/`jpeg`、`tif`/`tiff`）都算匹配，避免把用户
+    /// 原本就写对的扩展名强行改写成 `canonical_extension` 的那一种拼法。
+    fn matches_extension(self, extension: &str) -> bool {
+        let extension = extension.to_ascii_lowercase();
+        match self {
+            Self::Jpeg => extension == "jpg" || extension == "jpeg",
+            Self::Tiff => extension == "tif" || extension == "tiff",
+            other => extension == other.canonical_extension(),
+        }
+    }
+
+    fn mime_type(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Gif => "image/gif",
+            Self::WebP => "image/webp",
+            Self::Avif => "image/avif",
+            Self::Bmp => "image/bmp",
+            Self::Tiff => "image/tiff",
+            Self::Ico => "image/x-icon",
+        }
+    }
 }
 
 /// 资产目录跟随真实文件系统 stem，必须保留大小写和标点。它与 Astro 为 URL 生成的
@@ -285,6 +372,10 @@ pub fn save_image(
     if bytes.len() > MAX_SAVED_IMAGE_BYTES {
         return Err(AppError::Io("单张图片超过 25 MiB，拒绝保存".into()));
     }
+    // 内容必须能被识别成受支持的图片格式才继续；跟大小/空检查放在一起，在创建
+    // 任何目录或文件之前就拒绝，不留下半个空的资产目录。
+    let format = SupportedImageFormat::sniff(bytes)
+        .ok_or_else(|| AppError::Io("无法识别图片格式，拒绝保存".into()))?;
     let post_path = resolve_post_path(&ctx.content_root, &ctx.config.extensions, post_id)?;
     if !post_path.is_file() {
         return Err(AppError::NotFound(post_id.to_owned()));
@@ -308,13 +399,21 @@ pub fn save_image(
     }
 
     let (final_name, should_write) = match suggested_name.and_then(sanitize_filename) {
-        // 有真实文件名（拖拽）：不同内容撞同名是正常情况，交给 unique_filename 加后缀
-        Some(name) => (unique_filename(&asset_dir, &name), true),
+        // 有真实文件名（拖拽）：扩展名跟识别出的内容对不上时改名而不是报错（拖拽
+        // 来源有时会给错或缺失扩展名），不同内容撞同名是正常情况，交给
+        // unique_filename 加后缀。
+        Some(name) => {
+            let reconciled = reconcile_extension(&name, format);
+            (unique_filename(&asset_dir, &reconciled), true)
+        }
         // 没有文件名（剪贴板粘贴）：内容寻址命名，同样的字节天然映射到同一个文件名，
-        // 已存在就直接复用（不重复占地方），不能走 unique_filename 那套"名字冲突就加后缀"的逻辑
+        // 已存在就直接复用（不重复占地方），不能走 unique_filename 那套"名字冲突就加后缀"的逻辑。
         None => {
-            let ext = sniff_image_extension(bytes).unwrap_or("png");
-            let desired = format!("{}.{ext}", &revision_of(bytes)[..8]);
+            let desired = format!(
+                "{}.{}",
+                &revision_of(bytes)[..8],
+                format.canonical_extension()
+            );
             let desired_path = asset_dir.join(&desired);
             if desired_path.is_file() && fs::read(&desired_path)? == bytes {
                 (desired, false)
@@ -393,34 +492,37 @@ fn write_new_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), AppError> 
     Ok(())
 }
 
-fn is_previewable_image_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            matches!(
-                extension.to_ascii_lowercase().as_str(),
-                "png"
-                    | "jpg"
-                    | "jpeg"
-                    | "gif"
-                    | "webp"
-                    | "avif"
-                    | "bmp"
-                    | "tif"
-                    | "tiff"
-                    | "ico"
-                    | "svg"
-            )
-        })
+/// 读到的字节数超过 `maximum` 时返回 `Ok(None)`，不把超限文件整个读进内存——
+/// 调用方决定超限时报什么错误；`fs::metadata` 查大小、再 `fs::read` 整个文件
+/// 这两步之间文件可能被外部替换/扩大，用 `Read::take` 从一开始就限制读取量
+/// 能关掉这个 TOCTOU 窗口。
+fn read_bounded_file(path: &Path, maximum: u64) -> Result<Option<Vec<u8>>, AppError> {
+    let file = fs::File::open(path)?;
+    let mut limited = file.take(maximum + 1);
+    let mut bytes = Vec::new();
+    limited.read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > maximum {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
+}
+
+pub struct ImageAsset {
+    pub bytes: Vec<u8>,
+    /// 由实际读到的字节内容识别得出，不是从 URL/文件名后缀猜测——文件名后缀
+    /// 和真实内容不一致时（理论上不该发生，但防御性地按内容为准）也能返回
+    /// 正确的 HTTP Content-Type。
+    pub content_type: &'static str,
 }
 
 /// 读取当前文章引用的本地图片。只接受相对文章目录的 URL，并在 percent decode 与
 /// canonicalize 后再次确认仍位于 content_root；不为前端开放通用文件读取能力。
+/// 是否能预览完全由内容嗅探决定，不再有单独的扩展名白名单——包括不再接受 SVG。
 pub fn read_image_asset(
     ctx: &ProjectContext,
     post_id: &str,
     markdown_path: &str,
-) -> Result<Vec<u8>, AppError> {
+) -> Result<ImageAsset, AppError> {
     let post_path = resolve_post_path(&ctx.content_root, &ctx.config.extensions, post_id)?;
     if !post_path.is_file() {
         return Err(AppError::NotFound(post_id.to_owned()));
@@ -459,17 +561,15 @@ pub fn read_image_asset(
     if !canonical.starts_with(&ctx.content_root) || !canonical.is_file() {
         return Err(AppError::Io("图片路径超出项目内容目录".into()));
     }
-    if !is_previewable_image_path(&canonical) {
-        return Err(AppError::Io("该文件类型不能作为图片预览".into()));
-    }
 
-    let size = fs::metadata(&canonical)?.len();
-    if size > MAX_PREVIEW_IMAGE_BYTES {
-        return Err(AppError::Io(format!(
-            "图片超过实时预览的 25 MiB 限制：{markdown_path}"
-        )));
-    }
-    Ok(fs::read(canonical)?)
+    let bytes = read_bounded_file(&canonical, MAX_PREVIEW_IMAGE_BYTES)?
+        .ok_or_else(|| AppError::Io(format!("图片超过实时预览的 25 MiB 限制：{markdown_path}")))?;
+    let format = SupportedImageFormat::sniff(&bytes)
+        .ok_or_else(|| AppError::Io("该文件不是受支持的图片格式，无法预览".into()))?;
+    Ok(ImageAsset {
+        bytes,
+        content_type: format.mime_type(),
+    })
 }
 
 fn remove_dir_if_empty(dir: &Path) {
@@ -506,15 +606,38 @@ fn delete_pending_file(entry: &PendingAsset, current_path: &Path) -> Result<(), 
     Ok(())
 }
 
+/// 有界流式计算文件内容 SHA-256，不整体读入内存；超过 `maximum` 直接返回
+/// `Ok(None)`——调用方应当把它当作"内容已经被外部改变"处理，不能为了清理一个
+/// pending 图片就去读一个可能被换成几 GB 大文件。
+fn bounded_revision(path: &Path, maximum: u64) -> Result<Option<String>, AppError> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    let mut total: u64 = 0;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        total += read as u64;
+        if total > maximum {
+            return Ok(None);
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(Some(format!("{:x}", hasher.finalize())))
+}
+
 /// `entry.revision` 是粘贴/拖拽那一刻的图片内容哈希，跟文章自己的 revision
 /// 无关——文章保存不会让它失效。这里读盘比较当前内容是否还是同一份；不一致
-/// 说明文件已经被外部程序改过，不再归这次粘贴事务所有。
+/// （含读取途中发现文件已经超限的情况）说明文件已经被外部程序改过，不再归
+/// 这次粘贴事务所有。
 fn content_matches_pending_revision(
     entry: &PendingAsset,
     current_path: &Path,
 ) -> Result<bool, AppError> {
-    let bytes = fs::read(current_path)?;
-    Ok(revision_of(&bytes) == entry.revision)
+    let revision = bounded_revision(current_path, MAX_SAVED_IMAGE_BYTES as u64)?;
+    Ok(revision.as_deref() == Some(entry.revision.as_str()))
 }
 
 fn cleanup_pending_asset(entry: &PendingAsset) -> Result<(), AppError> {
@@ -609,18 +732,41 @@ mod tests {
     }
 
     #[test]
-    fn sniff_image_extension_detects_known_formats() {
-        assert_eq!(sniff_image_extension(PNG_MAGIC), Some("png"));
+    fn supported_image_format_sniffs_known_formats_by_signature() {
         assert_eq!(
-            sniff_image_extension(&[0xFF, 0xD8, 0xFF, 0x00]),
-            Some("jpg")
+            SupportedImageFormat::sniff(PNG_MAGIC),
+            Some(SupportedImageFormat::Png)
         );
-        assert_eq!(sniff_image_extension(b"GIF89a..."), Some("gif"));
+        assert_eq!(
+            SupportedImageFormat::sniff(&[0xFF, 0xD8, 0xFF, 0x00]),
+            Some(SupportedImageFormat::Jpeg)
+        );
+        assert_eq!(
+            SupportedImageFormat::sniff(b"GIF89a..."),
+            Some(SupportedImageFormat::Gif)
+        );
         let mut webp = b"RIFF".to_vec();
         webp.extend_from_slice(&[0, 0, 0, 0]);
         webp.extend_from_slice(b"WEBP");
-        assert_eq!(sniff_image_extension(&webp), Some("webp"));
-        assert_eq!(sniff_image_extension(b"not an image"), None);
+        assert_eq!(
+            SupportedImageFormat::sniff(&webp),
+            Some(SupportedImageFormat::WebP)
+        );
+        assert_eq!(SupportedImageFormat::sniff(b"not an image"), None);
+        // SVG 是 XML 文本，没有固定魔数可嗅探——CloudStack 就不支持它。
+        assert_eq!(
+            SupportedImageFormat::sniff(b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"),
+            None
+        );
+    }
+
+    #[test]
+    fn supported_image_format_extension_matching_accepts_equivalent_spellings() {
+        assert!(SupportedImageFormat::Jpeg.matches_extension("jpg"));
+        assert!(SupportedImageFormat::Jpeg.matches_extension("JPEG"));
+        assert!(!SupportedImageFormat::Jpeg.matches_extension("png"));
+        assert!(SupportedImageFormat::Tiff.matches_extension("tif"));
+        assert!(SupportedImageFormat::Tiff.matches_extension("tiff"));
     }
 
     fn make_post(ctx: &ProjectContext, id: &str) {
@@ -691,11 +837,17 @@ mod tests {
         let (_dir, ctx) = ctx();
         make_post(&ctx, "hello.md");
 
+        // 内容必须仍然能被嗅探成受支持的图片格式，否则会先被"无法识别"拒绝而
+        // 不是走到"同名冲突加后缀"这条路径；用同一签名但不同负载模拟"不同的
+        // PNG 内容"。
+        let mut different_png = PNG_MAGIC.to_vec();
+        different_png.extend_from_slice(b"different payload");
+
         let rel1 = save_image(&ctx, "hello.md", Some("cover.png"), PNG_MAGIC)
             .unwrap()
             .image
             .markdown_path;
-        let rel2 = save_image(&ctx, "hello.md", Some("cover.png"), b"different bytes")
+        let rel2 = save_image(&ctx, "hello.md", Some("cover.png"), &different_png)
             .unwrap()
             .image
             .markdown_path;
@@ -706,6 +858,37 @@ mod tests {
             std::fs::read(ctx.content_root.join("hello/cover.png")).unwrap(),
             PNG_MAGIC
         );
+    }
+
+    #[test]
+    fn save_image_rejects_unrecognized_content_even_with_an_image_looking_name() {
+        let (_dir, ctx) = ctx();
+        make_post(&ctx, "hello.md");
+
+        assert!(save_image(&ctx, "hello.md", Some("cover.png"), b"not an image").is_err());
+        assert!(save_image(&ctx, "hello.md", None, b"not an image").is_err());
+        // 拒绝时不留下半个资产目录
+        assert!(!ctx.content_root.join("hello").exists());
+    }
+
+    #[test]
+    fn save_image_corrects_extension_to_match_detected_content() {
+        let (_dir, ctx) = ctx();
+        make_post(&ctx, "hello.md");
+
+        let jpeg_bytes: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+        let rel = save_image(&ctx, "hello.md", Some("cover.png"), jpeg_bytes)
+            .unwrap()
+            .image
+            .markdown_path;
+        assert_eq!(rel, "hello/cover.jpg");
+        assert!(ctx.content_root.join("hello/cover.jpg").is_file());
+
+        let rel = save_image(&ctx, "hello.md", Some("untitled"), PNG_MAGIC)
+            .unwrap()
+            .image
+            .markdown_path;
+        assert_eq!(rel, "hello/untitled.png");
     }
 
     #[test]
@@ -757,13 +940,53 @@ mod tests {
         )
         .unwrap();
 
-        let bytes = read_image_asset(
+        let image = read_image_asset(
             &ctx,
             "nested/post.md",
             "./post/cover%20photo.png?width=800#hero",
         )
         .unwrap();
-        assert_eq!(bytes, PNG_MAGIC);
+        assert_eq!(image.bytes, PNG_MAGIC);
+        assert_eq!(image.content_type, "image/png");
+    }
+
+    #[test]
+    fn preview_content_type_comes_from_sniffed_bytes_not_the_file_extension() {
+        let (_dir, ctx) = ctx();
+        make_post(&ctx, "hello.md");
+        // 文件名后缀是 .png，但实际内容是 JPEG——content_type 应该以真实内容为准。
+        let jpeg_bytes: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+        fs::create_dir_all(ctx.content_root.join("hello")).unwrap();
+        fs::write(ctx.content_root.join("hello/cover.png"), jpeg_bytes).unwrap();
+
+        let image = read_image_asset(&ctx, "hello.md", "hello/cover.png").unwrap();
+        assert_eq!(image.content_type, "image/jpeg");
+    }
+
+    #[test]
+    fn preview_rejects_svg_and_other_unrecognized_content() {
+        let (_dir, ctx) = ctx();
+        make_post(&ctx, "hello.md");
+        fs::create_dir_all(ctx.content_root.join("hello")).unwrap();
+        fs::write(
+            ctx.content_root.join("hello/icon.svg"),
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+        )
+        .unwrap();
+
+        assert!(read_image_asset(&ctx, "hello.md", "hello/icon.svg").is_err());
+    }
+
+    #[test]
+    fn preview_read_is_bounded_and_does_not_load_oversized_files() {
+        let (_dir, ctx) = ctx();
+        make_post(&ctx, "hello.md");
+        fs::create_dir_all(ctx.content_root.join("hello")).unwrap();
+        let mut oversized = PNG_MAGIC.to_vec();
+        oversized.resize(usize::try_from(MAX_PREVIEW_IMAGE_BYTES).unwrap() + 1, 0);
+        fs::write(ctx.content_root.join("hello/huge.png"), &oversized).unwrap();
+
+        assert!(read_image_asset(&ctx, "hello.md", "hello/huge.png").is_err());
     }
 
     #[test]
@@ -997,6 +1220,30 @@ mod tests {
             1
         );
         assert!(path.is_file(), "内容被外部改过的文件不应该被删除");
+        assert!(!pending.has_pending(&ctx.root, "hello.md"));
+    }
+
+    #[test]
+    fn reconcile_saved_post_does_not_hash_an_externally_oversized_pending_file() {
+        let (_dir, ctx) = ctx();
+        make_post(&ctx, "hello.md");
+        let dropped = save_image(&ctx, "hello.md", Some("b.png"), PNG_MAGIC).unwrap();
+        let path = ctx.content_root.join(&dropped.image.markdown_path);
+        let mut pending = PendingAssetManager::default();
+        pending.track(dropped.pending.unwrap());
+
+        // 模拟外部程序把这张图片换成了一个超过保存上限的巨大文件：不能为了清理
+        // 一次 pending 图片就把它整个读进内存来算哈希。
+        let oversized = vec![0u8; MAX_SAVED_IMAGE_BYTES + 1];
+        fs::write(&path, &oversized).unwrap();
+
+        assert_eq!(
+            pending
+                .reconcile_saved_post(&ctx.root, "hello.md", "")
+                .unwrap(),
+            1
+        );
+        assert!(path.is_file(), "超限文件不应该被删除");
         assert!(!pending.has_pending(&ctx.root, "hello.md"));
     }
 }

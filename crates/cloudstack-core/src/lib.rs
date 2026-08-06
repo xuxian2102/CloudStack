@@ -13,6 +13,7 @@ pub mod services {
     pub mod frontmatter;
     pub mod git;
     pub mod markdown;
+    pub mod operations;
     pub mod posts;
     pub mod project;
     pub mod recent;

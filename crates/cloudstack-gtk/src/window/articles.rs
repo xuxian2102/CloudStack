@@ -5,8 +5,8 @@ use adw::prelude::*;
 use cloudstack_core::services::posts;
 
 use super::{
-    display_document, drafts, git_panel, has_unsaved_documents, populate_post_list, set_busy,
-    show_error, show_user_facing_error, toast, EditorState, Widgets,
+    app_data_dir, display_document, drafts, git_panel, has_unsaved_documents, populate_post_list,
+    set_busy, show_error, show_user_facing_error, toast, EditorState, Widgets,
 };
 use crate::i18n::{self, UiMessage};
 use crate::tasks;
@@ -174,8 +174,13 @@ fn rename_post(
     let state = Rc::clone(state);
     tasks::run(
         move || {
-            let renamed =
-                posts::rename_post(&task_context, &document.id, &new_id, &document.revision)?;
+            let renamed = posts::rename_post(
+                &task_context,
+                &document.id,
+                &new_id,
+                &document.revision,
+                &app_data_dir(),
+            )?;
             let summaries = posts::list_posts(&task_context)?;
             Ok((renamed, summaries))
         },

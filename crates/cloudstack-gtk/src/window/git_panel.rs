@@ -14,6 +14,7 @@ use super::{
     drafts, has_unsaved_documents, open_project, set_busy, show_error, show_user_facing,
     show_user_facing_error, toast, EditorState, Widgets,
 };
+use crate::app::should_apply_git_refresh;
 use crate::i18n::{self, UiMessage};
 use crate::tasks;
 
@@ -1384,16 +1385,28 @@ pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     };
     widgets.git_panel.set_loading();
     let expected_root = context.root.clone();
+    let expected_generation = {
+        let mut editor_state = state.borrow_mut();
+        editor_state.git_refresh_generation = editor_state.git_refresh_generation.wrapping_add(1);
+        editor_state.git_refresh_generation
+    };
     let widgets = widgets.clone();
     let state = Rc::clone(state);
     tasks::run(
         move || git::snapshot(&context),
         move |result| {
-            let still_current = state
-                .borrow()
-                .project
-                .as_ref()
-                .is_some_and(|current| current.root == expected_root);
+            let still_current = {
+                let editor_state = state.borrow();
+                should_apply_git_refresh(
+                    editor_state
+                        .project
+                        .as_ref()
+                        .map(|current| current.root.as_path()),
+                    &expected_root,
+                    editor_state.git_refresh_generation,
+                    expected_generation,
+                )
+            };
             if !still_current {
                 return;
             }

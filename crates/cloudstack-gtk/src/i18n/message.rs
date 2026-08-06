@@ -66,6 +66,9 @@ pub(crate) enum UiMessage {
         count: usize,
     },
     ProjectScanningStatus,
+    ArticleRenameRecovered {
+        count: usize,
+    },
     ArticleOpeningStatus,
     SavingStatus,
     UnsavedProjectSwitch,
@@ -253,6 +256,7 @@ pub(crate) enum UiMessage {
     GitErrorCommit,
     GitErrorTimeout,
     GitErrorOperation,
+    GitErrorUnsupportedPathEncoding,
     GitWorkspaceNoChanges,
     GitBranchDetached,
     GitTopologyNotInitialized,
@@ -510,6 +514,7 @@ impl UiMessage {
             Self::ReadyStatus => "ready-status",
             Self::ProjectOpenedStatus { .. } => "project-opened-status",
             Self::ProjectScanningStatus => "project-scanning-status",
+            Self::ArticleRenameRecovered { .. } => "article-rename-recovered",
             Self::ArticleOpeningStatus => "article-opening-status",
             Self::SavingStatus => "saving-status",
             Self::UnsavedProjectSwitch => "unsaved-project-switch",
@@ -650,6 +655,7 @@ impl UiMessage {
             Self::GitErrorCommit => "git-error-commit",
             Self::GitErrorTimeout => "git-error-timeout",
             Self::GitErrorOperation => "git-error-operation",
+            Self::GitErrorUnsupportedPathEncoding => "git-error-unsupported-path-encoding",
             Self::GitWorkspaceNoChanges => "git-workspace-no-changes",
             Self::GitBranchDetached => "git-branch-detached",
             Self::GitTopologyNotInitialized => "git-topology-not-initialized",
@@ -789,7 +795,7 @@ impl UiMessage {
             Self::GitSaveBeforeAction { count } | Self::GitSaveBeforeActionTooltip { count } => {
                 HashMap::from([(Cow::Borrowed("count"), FluentValue::from(*count))])
             }
-            Self::ProjectOpenedStatus { count } => {
+            Self::ProjectOpenedStatus { count } | Self::ArticleRenameRecovered { count } => {
                 HashMap::from([(Cow::Borrowed("count"), FluentValue::from(*count))])
             }
             Self::WindowTitle { folder } => {
@@ -1014,6 +1020,7 @@ pub(crate) fn message_samples() -> Vec<UiMessage> {
         UiMessage::ReadyStatus,
         UiMessage::ProjectOpenedStatus { count: 2 },
         UiMessage::ProjectScanningStatus,
+        UiMessage::ArticleRenameRecovered { count: 1 },
         UiMessage::ArticleOpeningStatus,
         UiMessage::SavingStatus,
         UiMessage::UnsavedProjectSwitch,
@@ -1201,6 +1208,7 @@ pub(crate) fn message_samples() -> Vec<UiMessage> {
         UiMessage::GitErrorCommit,
         UiMessage::GitErrorTimeout,
         UiMessage::GitErrorOperation,
+        UiMessage::GitErrorUnsupportedPathEncoding,
         UiMessage::GitWorkspaceNoChanges,
         UiMessage::GitBranchDetached,
         UiMessage::GitTopologyNotInitialized,

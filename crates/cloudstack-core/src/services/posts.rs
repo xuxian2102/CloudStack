@@ -14,6 +14,7 @@ use crate::model::{PostDocument, PostSummary, ProjectContext};
 use crate::path_guard::resolve_post_path;
 use crate::services::assets::asset_dir_for_post;
 use crate::services::markdown;
+use crate::services::operations;
 
 pub fn revision_of(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -265,11 +266,19 @@ pub fn validate_rename(
     Ok(())
 }
 
+/// 除了 `expected_revision` 之外，重命名在开始移动任何文件之前，会先把完整操作
+/// 意图写进 `app_data_dir` 下的 crash-safe journal（见
+/// `crate::services::operations`）。这不是给正常的 in-process 失败用的——那种
+/// 情况仍然沿用下面的 best-effort 回滚；journal 是给"整个进程在移动文件的过程
+/// 中被杀掉"这种情况兜底：下次打开同一个项目时，`operations::recover_pending_renames`
+/// 会把任何遗留的半完成操作"继续做完"，不会留下图片已经搬走、文章还没搬这种
+/// 永久不一致的中间态。
 pub fn rename_post(
     ctx: &ProjectContext,
     old_id: &str,
     new_id: &str,
     expected_revision: &str,
+    app_data_dir: &Path,
 ) -> Result<PostDocument, AppError> {
     validate_rename(ctx, old_id, new_id, expected_revision)?;
     let old_path = resolve_post_path(&ctx.content_root, &ctx.config.extensions, old_id)?;
@@ -301,6 +310,11 @@ pub fn rename_post(
     let new_asset_dir = asset_dir_for_post(ctx, new_id)?;
     let asset_moves = plan_colocated_asset_moves(ctx, old_id, new_id, body)?;
 
+    // journal 落盘失败就整体放弃——此时还没有任何文件被移动，直接返回错误让
+    // 调用方重试，不留下任何需要恢复的痕迹。
+    let journal_path =
+        operations::write_rename_journal(app_data_dir, ctx, old_id, new_id, &asset_moves)?;
+
     if let Some(parent) = new_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -313,31 +327,51 @@ pub fn rename_post(
     let mut moved_assets: Vec<(PathBuf, PathBuf)> = Vec::new();
     for (source, target) in &asset_moves {
         if let Err(error) = fs::rename(source, target) {
-            rollback_asset_moves(&moved_assets);
+            finish_after_rollback(&journal_path, rollback_asset_moves(&moved_assets));
             remove_dir_if_empty(&new_asset_dir);
             return Err(error.into());
         }
         moved_assets.push((source.clone(), target.clone()));
     }
     if let Err(error) = fs::rename(&old_path, &new_path) {
-        rollback_asset_moves(&moved_assets);
+        finish_after_rollback(&journal_path, rollback_asset_moves(&moved_assets));
         remove_dir_if_empty(&new_asset_dir);
         return Err(error.into());
     }
     if let Some(text) = rewritten {
         if let Err(error) = atomic_write(&new_path, text.as_bytes()) {
-            let _ = fs::rename(&new_path, &old_path);
-            rollback_asset_moves(&moved_assets);
+            let mut rollback_succeeded = fs::rename(&new_path, &old_path).is_ok();
+            rollback_succeeded &= rollback_asset_moves(&moved_assets);
+            finish_after_rollback(&journal_path, rollback_succeeded);
             remove_dir_if_empty(&new_asset_dir);
             return Err(error);
         }
     }
     remove_dir_if_empty(&old_asset_dir);
+    operations::remove_rename_journal(&journal_path);
 
     read_post(ctx, new_id)
 }
 
-fn rollback_asset_moves(moved: &[(PathBuf, PathBuf)]) {
+/// 回滚成功就说明磁盘状态已经确定落回旧状态，journal 可以删掉；回滚本身失败
+/// （极罕见的二次故障）就必须保留 journal——下次打开项目时，
+/// `operations::recover_pending_renames` 会把这个半完成的操作继续做完，而不是
+/// 让它永远卡在不一致的中间态。
+fn finish_after_rollback(journal_path: &Path, rollback_succeeded: bool) {
+    if rollback_succeeded {
+        operations::remove_rename_journal(journal_path);
+    } else {
+        log::error!(
+            "重命名回滚未完全成功，保留操作日志待下次打开项目时恢复：{}",
+            journal_path.display()
+        );
+    }
+}
+
+/// 尽力把已经移动的图片挪回原位；返回是否全部回滚成功。
+#[must_use]
+fn rollback_asset_moves(moved: &[(PathBuf, PathBuf)]) -> bool {
+    let mut succeeded = true;
     for (source, target) in moved.iter().rev() {
         if let Err(error) = fs::rename(target, source) {
             log::error!(
@@ -345,14 +379,40 @@ fn rollback_asset_moves(moved: &[(PathBuf, PathBuf)]) {
                 target.display(),
                 source.display()
             );
+            succeeded = false;
         }
     }
+    succeeded
 }
 
-fn remove_dir_if_empty(path: &Path) {
+pub(crate) fn remove_dir_if_empty(path: &Path) {
     if path.is_dir() && fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none()) {
         let _ = fs::remove_dir(path);
     }
+}
+
+/// `rename_post` 崩溃恢复用：`post_path` 当前内容里如果还有指向 `old_id` 同名
+/// 目录的图片路径就原地原子重写成指向 `new_id`；已经是新路径（或者本来就不需要
+/// 重写）时什么也不做。之所以可以在任意时刻对着 `post_path` 当前内容重新跑一遍，
+/// 是因为 `rewrite_colocated_image_paths` 只找 `old_dir/` 前缀——内容已经被重写
+/// 过之后就再也找不到这个前缀，天然是幂等的。
+pub(crate) fn reapply_colocated_image_rewrite(
+    post_path: &Path,
+    old_id: &str,
+    new_id: &str,
+) -> Result<(), AppError> {
+    let bytes = read_existing(post_path, new_id)?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| AppError::Io(format!("文件不是 UTF-8 编码：{new_id}")))?;
+    let (_, body) = split_markdown(&text);
+    let rewritten_body = rewrite_colocated_image_paths(body, old_id, new_id)?;
+    if rewritten_body == body {
+        return Ok(());
+    }
+    let body_offset = body.as_ptr() as usize - text.as_ptr() as usize;
+    let mut rewritten_text = text.clone();
+    rewritten_text.replace_range(body_offset.., &rewritten_body);
+    atomic_write(post_path, rewritten_text.as_bytes())
 }
 
 fn plan_colocated_asset_moves(
@@ -720,7 +780,18 @@ mod tests {
         new_id: &str,
     ) -> Result<PostDocument, AppError> {
         let revision = read_post(ctx, old_id)?.revision;
-        rename_post(ctx, old_id, new_id, &revision)
+        let app_data = tempfile::tempdir().unwrap();
+        rename_post(ctx, old_id, new_id, &revision, app_data.path())
+    }
+
+    fn rename_current_in(
+        ctx: &ProjectContext,
+        old_id: &str,
+        new_id: &str,
+        app_data_dir: &Path,
+    ) -> Result<PostDocument, AppError> {
+        let revision = read_post(ctx, old_id)?.revision;
+        rename_post(ctx, old_id, new_id, &revision, app_data_dir)
     }
 
     #[test]
@@ -932,10 +1003,41 @@ mod tests {
         let doc = create_post(&ctx, "a.md", None, "body").unwrap();
         fs::write(ctx.content_root.join("a.md"), "external edit").unwrap();
 
-        let error = rename_post(&ctx, "a.md", "b.md", &doc.revision).unwrap_err();
+        let app_data = tempfile::tempdir().unwrap();
+        let error = rename_post(&ctx, "a.md", "b.md", &doc.revision, app_data.path()).unwrap_err();
         assert!(matches!(error, AppError::ExternalModificationConflict));
         assert!(ctx.content_root.join("a.md").is_file());
         assert!(!ctx.content_root.join("b.md").exists());
+        assert!(
+            fs::read_dir(app_data.path().join("operations"))
+                .into_iter()
+                .flatten()
+                .next()
+                .is_none(),
+            "revision 冲突在写 journal 之前就该被拒绝，不应该留下任何操作日志"
+        );
+    }
+
+    #[test]
+    fn rename_removes_its_journal_on_success_and_leaves_none_behind() {
+        let (_dir, ctx) = ctx();
+        create_post(&ctx, "hello.md", None, "![](hello/cover.png)").unwrap();
+        fs::create_dir_all(ctx.content_root.join("hello")).unwrap();
+        fs::write(ctx.content_root.join("hello/cover.png"), "png").unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+
+        rename_current_in(&ctx, "hello.md", "world.md", app_data.path()).unwrap();
+
+        let operations_dir = app_data.path().join("operations");
+        let remaining: Vec<_> = fs::read_dir(&operations_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .collect();
+        assert!(
+            remaining.is_empty(),
+            "重命名成功后不应该留下任何操作日志：{remaining:?}"
+        );
     }
 
     #[test]

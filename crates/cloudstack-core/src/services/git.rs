@@ -17,6 +17,10 @@ const MAX_GIT_STREAM_BYTES: usize = 16 * 1024 * 1024;
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const GIT_PUSH_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// `git_error()`（GTK i18n 层）按这段文本匹配出专用的用户提示；改动措辞时要同步改那边。
+pub const UNSUPPORTED_PATH_ENCODING_ERROR: &str =
+    "Git 仓库包含非 UTF-8 编码的文件路径，CloudStack 暂不支持管理该仓库";
+
 struct CommandOutput {
     status: ExitStatus,
     stdout: Vec<u8>,
@@ -272,8 +276,7 @@ pub fn status(ctx: &ProjectContext) -> Result<GitStatus, AppError> {
     if !output.status.success() {
         return Err(map_git_error(&output));
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_porcelain_v2(&text, &ctx.config.content_dir))
+    parse_porcelain_v2(&output.stdout, &ctx.config.content_dir)
 }
 
 fn repository_root(root: &Path) -> Result<Option<PathBuf>, AppError> {
@@ -602,9 +605,18 @@ fn build_change(xy: &str, path: String, old_path: Option<String>, content_dir: &
     }
 }
 
+/// 路径字段只在这里做严格 UTF-8 校验；失败立即整体拒绝，不用 `from_utf8_lossy`
+/// 静默替换成 `�`——lossy 之后的路径还会被当 pathspec 传回 `git add`/`git commit`，
+/// 静默损坏比明确报错更危险（回传大概率匹配不到原文件）。
+fn parse_utf8_field(bytes: &[u8]) -> Result<String, AppError> {
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|_| AppError::Git(UNSUPPORTED_PATH_ENCODING_ERROR.to_owned()))
+}
+
 /// `1 XY sub mH mI mW hH hI path`（"1 " 已被调用方剥离）
-fn parse_ordinary_fields(rest: &str) -> Option<(&str, &str)> {
-    let mut parts = rest.splitn(8, ' ');
+fn parse_ordinary_fields(rest: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut parts = rest.splitn(8, |&b| b == b' ');
     let xy = parts.next()?;
     for _ in 0..6 {
         parts.next()?;
@@ -614,8 +626,8 @@ fn parse_ordinary_fields(rest: &str) -> Option<(&str, &str)> {
 }
 
 /// `2 XY sub mH mI mW hH hI X<score> path`（origPath 是下一个 NUL 分隔的 token）
-fn parse_rename_fields(rest: &str) -> Option<(&str, &str)> {
-    let mut parts = rest.splitn(9, ' ');
+fn parse_rename_fields(rest: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut parts = rest.splitn(9, |&b| b == b' ');
     let xy = parts.next()?;
     for _ in 0..7 {
         parts.next()?;
@@ -624,26 +636,45 @@ fn parse_rename_fields(rest: &str) -> Option<(&str, &str)> {
     Some((xy, path))
 }
 
-/// 解析 `git status --porcelain=v2 --branch -z` 的输出。
+/// `u XY sub m1 m2 m3 mW h1 h2 h3 path`（"u " 已被调用方剥离）。固定字段数解析，
+/// 不能像以前那样用 `split_whitespace().last()`——那种写法会把路径本身含有的
+/// 空格/Tab 一起吃掉，只留下最后一段。
+fn parse_unmerged_fields(rest: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut parts = rest.splitn(10, |&b| b == b' ');
+    let xy = parts.next()?;
+    for _ in 0..8 {
+        parts.next()?;
+    }
+    let path = parts.next()?;
+    Some((xy, path))
+}
+
+/// 解析 `git status --porcelain=v2 --branch -z` 的原始字节输出。
 /// 用 -z 而不是默认的换行分隔，是因为文章标题常含中文/特殊字符，
 /// 非 -z 模式下 git 会对路径做 C 风格转义，徒增解析负担。
-pub fn parse_porcelain_v2(text: &str, content_dir: &str) -> GitStatus {
+///
+/// 全程按字节操作，只在确定某个字段要进入 `FileChange`/分支名时才严格转成
+/// UTF-8（`parse_utf8_field`）；`from_utf8_lossy` 只允许用在纯展示的
+/// `CommandTrace` 里，绝不能用于这里的路径判断或 pathspec 构造。
+pub fn parse_porcelain_v2(output: &[u8], content_dir: &str) -> Result<GitStatus, AppError> {
     let mut branch = None;
     let mut upstream = None;
     let mut ahead = 0u32;
     let mut behind = 0u32;
     let mut changes = Vec::new();
 
-    let mut tokens = text.split('\0').filter(|t| !t.is_empty());
+    let mut tokens = output.split(|&b| b == b'\0').filter(|t| !t.is_empty());
 
     while let Some(tok) = tokens.next() {
-        if let Some(rest) = tok.strip_prefix("# branch.head ") {
+        if let Some(rest) = tok.strip_prefix(b"# branch.head ") {
+            let rest = parse_utf8_field(rest)?;
             if rest != "(detached)" {
-                branch = Some(rest.to_string());
+                branch = Some(rest);
             }
-        } else if let Some(rest) = tok.strip_prefix("# branch.upstream ") {
-            upstream = Some(rest.to_string());
-        } else if let Some(rest) = tok.strip_prefix("# branch.ab ") {
+        } else if let Some(rest) = tok.strip_prefix(b"# branch.upstream ") {
+            upstream = Some(parse_utf8_field(rest)?);
+        } else if let Some(rest) = tok.strip_prefix(b"# branch.ab ") {
+            let rest = parse_utf8_field(rest)?;
             for part in rest.split_whitespace() {
                 if let Some(n) = part.strip_prefix('+') {
                     ahead = n.parse().unwrap_or(0);
@@ -651,51 +682,52 @@ pub fn parse_porcelain_v2(text: &str, content_dir: &str) -> GitStatus {
                     behind = n.parse().unwrap_or(0);
                 }
             }
-        } else if tok.starts_with("# ") {
+        } else if tok.starts_with(b"# ") {
             // 其他 header（如 branch.oid），忽略
-        } else if let Some(rest) = tok.strip_prefix("1 ") {
+        } else if let Some(rest) = tok.strip_prefix(b"1 ") {
             if let Some((xy, path)) = parse_ordinary_fields(rest) {
-                changes.push(build_change(xy, path.to_string(), None, content_dir));
+                let xy = parse_utf8_field(xy)?;
+                let path = parse_utf8_field(path)?;
+                changes.push(build_change(&xy, path, None, content_dir));
             }
-        } else if let Some(rest) = tok.strip_prefix("2 ") {
+        } else if let Some(rest) = tok.strip_prefix(b"2 ") {
             if let Some((xy, path)) = parse_rename_fields(rest) {
-                let old_path = tokens.next().unwrap_or("").to_string();
-                changes.push(build_change(
-                    xy,
-                    path.to_string(),
-                    Some(old_path),
-                    content_dir,
-                ));
+                let xy = parse_utf8_field(xy)?;
+                let path = parse_utf8_field(path)?;
+                let old_path = parse_utf8_field(tokens.next().unwrap_or(b""))?;
+                changes.push(build_change(&xy, path, Some(old_path), content_dir));
             }
-        } else if let Some(rest) = tok.strip_prefix("u ") {
-            if let Some(path) = rest.split_whitespace().last() {
+        } else if let Some(rest) = tok.strip_prefix(b"u ") {
+            if let Some((_, path)) = parse_unmerged_fields(rest) {
+                let path = parse_utf8_field(path)?;
                 changes.push(FileChange {
-                    path: path.to_string(),
+                    managed: is_managed(&path, content_dir),
+                    path,
                     old_path: None,
                     kind: ChangeKind::Unmerged,
                     staged: false,
-                    managed: is_managed(path, content_dir),
                 });
             }
-        } else if let Some(path) = tok.strip_prefix("? ") {
+        } else if let Some(path) = tok.strip_prefix(b"? ") {
+            let path = parse_utf8_field(path)?;
             changes.push(FileChange {
-                path: path.to_string(),
+                managed: is_managed(&path, content_dir),
+                path,
                 old_path: None,
                 kind: ChangeKind::Untracked,
                 staged: false,
-                managed: is_managed(path, content_dir),
             });
         }
         // "!" ignored 条目：没有传 --ignored，不会出现
     }
 
-    GitStatus {
+    Ok(GitStatus {
         branch,
         upstream,
         ahead,
         behind,
         changes,
-    }
+    })
 }
 
 fn current_commit_hash(root: &Path) -> Option<String> {
@@ -1267,12 +1299,14 @@ fn publish_internal(
 mod tests {
     use super::*;
     use crate::model::ProjectConfig;
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::ffi::OsStringExt;
     use std::path::PathBuf;
 
-    fn porcelain(parts: &[&str]) -> String {
+    fn porcelain(parts: &[&str]) -> Vec<u8> {
         let mut s = parts.join("\0");
         s.push('\0');
-        s
+        s.into_bytes()
     }
 
     #[test]
@@ -1284,7 +1318,7 @@ mod tests {
             "# branch.ab +2 -1",
             "1 .M N... 100644 100644 100644 h1 h2 src/content/blog/a.md",
         ]);
-        let status = parse_porcelain_v2(&text, "src/content/blog");
+        let status = parse_porcelain_v2(&text, "src/content/blog").unwrap();
         assert_eq!(status.branch.as_deref(), Some("main"));
         assert_eq!(status.upstream.as_deref(), Some("origin/main"));
         assert_eq!(status.ahead, 2);
@@ -1306,7 +1340,7 @@ mod tests {
             "1 .M N... 100644 100644 100644 h1 h2 .cloudstack.json",
             "1 .M N... 100644 100644 100644 h1 h2 README.md",
         ]);
-        let status = parse_porcelain_v2(&text, "src/content/blog");
+        let status = parse_porcelain_v2(&text, "src/content/blog").unwrap();
         let by_path = |p: &str| status.changes.iter().find(|c| c.path == p).unwrap();
 
         let added = by_path("src/content/blog/new.md");
@@ -1330,7 +1364,7 @@ mod tests {
             "? .cloudstack.json",
             "1 .M N... 100644 100644 100644 h1 h2 .blog-editor.json",
         ]);
-        let status = parse_porcelain_v2(&text, "src/content/blog");
+        let status = parse_porcelain_v2(&text, "src/content/blog").unwrap();
         let by_path = |path: &str| status.changes.iter().find(|c| c.path == path).unwrap();
 
         assert!(!by_path(".cloudstack.json").managed);
@@ -1344,12 +1378,38 @@ mod tests {
             "2 R. N... 100644 100644 100644 h1 h2 R100 src/content/blog/new-name.md",
             "src/content/blog/old-name.md",
         ]);
-        let status = parse_porcelain_v2(&text, "src/content/blog");
+        let status = parse_porcelain_v2(&text, "src/content/blog").unwrap();
         assert_eq!(status.changes.len(), 1);
         let c = &status.changes[0];
         assert_eq!(c.path, "src/content/blog/new-name.md");
         assert_eq!(c.old_path.as_deref(), Some("src/content/blog/old-name.md"));
         assert_eq!(c.kind, ChangeKind::Renamed);
+    }
+
+    /// `u` 记录以前用 `split_whitespace().last()` 取路径，路径本身含空格/Tab
+    /// 时会被截断——这里覆盖空格、多个连续空格、Tab、中文、首尾空格几种情况，
+    /// 确认固定字段数解析把路径完整保留下来。
+    #[test]
+    fn parses_unmerged_paths_containing_whitespace() {
+        let cases: &[&str] = &[
+            "src/content/blog/my article.md",
+            "src/content/blog/many   spaces.md",
+            "src/content/blog/has\ttab.md",
+            "src/content/blog/中文 标题.md",
+            "src/content/blog/ leading and trailing .md",
+        ];
+        for path in cases {
+            let text = porcelain(&[&format!(
+                "u UU N... 100644 100644 100644 100644 h1 h2 h3 {path}"
+            )]);
+            let status = parse_porcelain_v2(&text, "src/content/blog").unwrap();
+            assert_eq!(status.changes.len(), 1, "path = {path:?}");
+            let change = &status.changes[0];
+            assert_eq!(change.path, *path);
+            assert_eq!(change.kind, ChangeKind::Unmerged);
+            assert!(!change.staged);
+            assert!(change.managed);
+        }
     }
 
     #[test]
@@ -1359,7 +1419,7 @@ mod tests {
             "# branch.head main",
             "? src/content/blog/a.md",
         ]);
-        let status = parse_porcelain_v2(&text, "src/content/blog");
+        let status = parse_porcelain_v2(&text, "src/content/blog").unwrap();
         assert_eq!(status.branch.as_deref(), Some("main"));
         assert_eq!(status.upstream, None);
         assert_eq!(status.ahead, 0);
@@ -1369,7 +1429,7 @@ mod tests {
     #[test]
     fn detached_head_has_no_branch_name() {
         let text = porcelain(&["# branch.head (detached)"]);
-        let status = parse_porcelain_v2(&text, "src/content/blog");
+        let status = parse_porcelain_v2(&text, "src/content/blog").unwrap();
         assert_eq!(status.branch, None);
     }
 
@@ -1433,7 +1493,8 @@ mod tests {
                 "? src/content/blog/published.md",
             ]),
             "src/content/blog",
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             ManagedScope::from_status(&ctx, &status).paths(),
@@ -1466,7 +1527,8 @@ mod tests {
                 "? src/content/blog/hello/nested/photo.png",
             ]),
             "src/content/blog",
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             ManagedScope::from_status(&ctx, &status).paths(),
@@ -1539,6 +1601,115 @@ mod tests {
             .unwrap();
         assert_eq!(a.kind, ChangeKind::Untracked);
         assert!(a.managed);
+    }
+
+    /// 构造一个不是合法 UTF-8 的文件名字节序列，落在 content_dir 下的相对路径里。
+    fn non_utf8_relative_path() -> OsString {
+        let mut bytes = b"src/content/blog/bad-".to_vec();
+        bytes.push(0xFF);
+        bytes.extend_from_slice(b".md");
+        OsString::from_vec(bytes)
+    }
+
+    fn run_raw(root: &Path, args: &[&OsStr]) {
+        let status = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} 失败");
+    }
+
+    #[test]
+    fn status_rejects_non_utf8_untracked_filename_without_partial_results() {
+        let (_dir, ctx) = init_repo();
+        let relative = non_utf8_relative_path();
+        std::fs::write(ctx.root.join(&relative), "body").unwrap();
+
+        let error = super::status(&ctx).unwrap_err();
+        match error {
+            AppError::Git(detail) => assert_eq!(detail, UNSUPPORTED_PATH_ENCODING_ERROR),
+            other => panic!("expected AppError::Git, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_rejects_non_utf8_staged_ordinary_filename() {
+        let (_dir, ctx) = init_repo();
+        let relative = non_utf8_relative_path();
+        std::fs::write(ctx.root.join(&relative), "body").unwrap();
+        run_raw(
+            &ctx.root,
+            &[OsStr::new("add"), OsStr::new("--"), relative.as_os_str()],
+        );
+
+        let error = super::status(&ctx).unwrap_err();
+        match error {
+            AppError::Git(detail) => assert_eq!(detail, UNSUPPORTED_PATH_ENCODING_ERROR),
+            other => panic!("expected AppError::Git, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_rejects_non_utf8_rename_old_path() {
+        let (_dir, ctx) = init_repo();
+        let relative = non_utf8_relative_path();
+        std::fs::write(ctx.root.join(&relative), "body\n").unwrap();
+        run_raw(
+            &ctx.root,
+            &[OsStr::new("add"), OsStr::new("--"), relative.as_os_str()],
+        );
+        run_raw(
+            &ctx.root,
+            &[
+                OsStr::new("commit"),
+                OsStr::new("-q"),
+                OsStr::new("-m"),
+                OsStr::new("base"),
+            ],
+        );
+        run_raw(
+            &ctx.root,
+            &[
+                OsStr::new("mv"),
+                relative.as_os_str(),
+                OsStr::new("src/content/blog/renamed.md"),
+            ],
+        );
+
+        let error = super::status(&ctx).unwrap_err();
+        match error {
+            AppError::Git(detail) => assert_eq!(detail, UNSUPPORTED_PATH_ENCODING_ERROR),
+            other => panic!("expected AppError::Git, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publish_stops_before_staging_when_a_managed_path_is_not_utf8() {
+        let (_dir, ctx) = init_repo();
+        std::fs::write(ctx.content_root.join("clean.md"), "ok\n").unwrap();
+        let relative = non_utf8_relative_path();
+        std::fs::write(ctx.root.join(&relative), "body").unwrap();
+
+        let head_before = current_commit_hash(&ctx.root);
+        let error = publish(&ctx, "不应提交", false).unwrap_err();
+        match error {
+            AppError::Git(detail) => assert_eq!(detail, UNSUPPORTED_PATH_ENCODING_ERROR),
+            other => panic!("expected AppError::Git, got {other:?}"),
+        }
+
+        let cached = run_git(&ctx.root, &["diff", "--cached", "--name-only"])
+            .unwrap()
+            .stdout;
+        assert!(
+            cached.is_empty(),
+            "编码错误之后不应该有任何路径被 git add 进索引"
+        );
+        assert_eq!(
+            current_commit_hash(&ctx.root),
+            head_before,
+            "编码错误之后不应该产生新提交"
+        );
     }
 
     #[test]
