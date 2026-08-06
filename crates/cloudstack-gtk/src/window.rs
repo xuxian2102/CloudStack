@@ -1256,6 +1256,9 @@ fn save_document_then(
     state: &Rc<RefCell<EditorState>>,
     on_saved: Option<Box<dyn FnOnce()>>,
 ) {
+    // 交互式保存的“单飞”约束：手动保存通过本路径发起并先置 busy=true，
+    // GTK 主线程串行分发事件下，第二次保存不会在第一次完成前插入执行。
+    // 后续若放开并发或多任务保存，需引入保存任务身份与乱序 completion 防护。
     if state.borrow().busy {
         return;
     }
