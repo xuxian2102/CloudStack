@@ -21,10 +21,13 @@ use cloudstack_core::services::{assets, git, operations, posts, project};
 use gtk::{gdk, gio, glib};
 use sourceview::prelude::*;
 
-use crate::app::{apply_successful_save, classify_save_completion, SaveCompletionOutcome};
 use crate::i18n::{self, UiMessage};
 use crate::search::SearchPanel;
 use crate::tasks;
+use cloudstack_application::{
+    apply_successful_save, capabilities_for, classify_save_completion, SaveCompletionOutcome,
+    WorkspaceCapabilities, WorkspaceCapabilitiesInput,
+};
 
 const DEFAULT_EDITOR_PANE_WIDTH: i32 = 570;
 const MIN_PREVIEW_PANE_WIDTH: i32 = 360;
@@ -1500,63 +1503,7 @@ fn set_busy(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, busy: bool, mes
     sync_controls(widgets, state);
 }
 
-/// `sync_controls` 要往控件上写的所有布尔值，跟 `EditorState` 的具体形状
-/// 解耦——只依赖 `controls_for` 算出来的这份纯数据快照，方便集中测试
-/// busy/document/dirty 对控件可用性的影响，不需要真的搭一个 GTK 窗口。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ControlModel {
-    /// 打开项目入口（顶栏按钮 + 欢迎页），有未保存文章或正忙时都要挡住。
-    open_enabled: bool,
-    home_enabled: bool,
-    new_post_enabled: bool,
-    rename_enabled: bool,
-    delete_enabled: bool,
-    save_enabled: bool,
-    editor_editable: bool,
-    editor_cursor_visible: bool,
-    frontmatter_panel_enabled: bool,
-    properties_enabled: bool,
-    git_project_available: bool,
-    git_dirty: bool,
-    git_primary_action: git_panel::EffectivePrimaryAction,
-    post_list_enabled: bool,
-    /// 只在没有文章展示时才强制收起 frontmatter 侧栏；文章重新出现时不会
-    /// 由这里负责重新展开（那是 toggle-properties 动作自己的事）。
-    hide_frontmatter_sidebar: bool,
-}
-
-fn controls_for(state: &EditorState) -> ControlModel {
-    let has_project = state.project.is_some();
-    let has_document = state.document.is_some();
-    let has_unsaved_documents = !state.unsaved_documents.is_empty();
-    // 有未保存文章挂在内存里时，跳项目/新建文章这类会离开当前上下文的
-    // 操作要挡住；已经在编辑的文档本身（保存、frontmatter、post_list）
-    // 只看 busy，不受这条限制。
-    let stable = !state.busy && !has_unsaved_documents;
-    ControlModel {
-        open_enabled: stable,
-        home_enabled: has_project && stable,
-        new_post_enabled: has_project && stable,
-        rename_enabled: has_document && stable,
-        delete_enabled: has_document && stable,
-        save_enabled: has_document && state.dirty && !state.busy,
-        editor_editable: has_document && !state.busy,
-        editor_cursor_visible: has_document,
-        frontmatter_panel_enabled: has_document && !state.busy,
-        properties_enabled: has_document && !state.busy,
-        git_project_available: has_project,
-        git_dirty: state.dirty,
-        git_primary_action: git_panel::effective_primary_action(
-            state.git_snapshot.as_ref(),
-            state.busy,
-            state.unsaved_documents.len(),
-        ),
-        post_list_enabled: has_project && !state.busy,
-        hide_frontmatter_sidebar: !has_document,
-    }
-}
-
-fn render_controls(widgets: &Widgets, model: &ControlModel) {
+fn render_controls(widgets: &Widgets, model: &WorkspaceCapabilities) {
     widgets.open_button.set_sensitive(model.open_enabled);
     widgets.welcome_page.set_open_sensitive(model.open_enabled);
     widgets.home_button.set_sensitive(model.home_enabled);
@@ -1588,8 +1535,21 @@ fn render_controls(widgets: &Widgets, model: &ControlModel) {
 }
 
 fn sync_controls(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
-    let model = controls_for(&state.borrow());
-    render_controls(widgets, &model);
+    // 借用只在算出不可变的 capabilities 快照期间存在；render_controls 触发
+    // 的 GTK setter 调用不会持有 state 的借用，避免以后某个 setter 的信号
+    // 回调间接再次借用 state 时产生运行时 borrow panic。
+    let capabilities = {
+        let state = state.borrow();
+        capabilities_for(WorkspaceCapabilitiesInput {
+            has_project: state.project.is_some(),
+            has_document: state.document.is_some(),
+            unsaved_document_count: state.unsaved_documents.len(),
+            busy: state.busy,
+            dirty: state.dirty,
+            git_snapshot: state.git_snapshot.as_ref(),
+        })
+    };
+    render_controls(widgets, &capabilities);
 }
 
 fn has_unsaved_documents(state: &Rc<RefCell<EditorState>>) -> bool {
@@ -1745,193 +1705,6 @@ mod tests {
         assert_eq!(
             document_window_title("nested/post.md", None, false),
             "nested/post.md — 云栈 CloudStack"
-        );
-    }
-
-    fn sample_project() -> ProjectContext {
-        ProjectContext {
-            root: PathBuf::from("/tmp/test-blog"),
-            content_root: PathBuf::from("/tmp/test-blog/content"),
-            config_path: PathBuf::from("/tmp/test-blog/.cloudstack.json"),
-            config: Default::default(),
-        }
-    }
-
-    fn sample_document() -> PostDocument {
-        PostDocument {
-            id: "hello.md".into(),
-            relative_path: "hello.md".into(),
-            raw_frontmatter: None,
-            body: String::new(),
-            revision: "revision".into(),
-        }
-    }
-
-    #[test]
-    fn controls_for_default_state_only_allows_opening() {
-        let model = controls_for(&EditorState::default());
-        assert!(model.open_enabled);
-        assert!(!model.home_enabled);
-        assert!(!model.new_post_enabled);
-        assert!(!model.rename_enabled);
-        assert!(!model.delete_enabled);
-        assert!(!model.save_enabled);
-        assert!(!model.editor_editable);
-        assert!(!model.editor_cursor_visible);
-        assert!(!model.frontmatter_panel_enabled);
-        assert!(!model.properties_enabled);
-        assert!(!model.git_project_available);
-        assert_eq!(
-            model.git_primary_action,
-            git_panel::EffectivePrimaryAction::None
-        );
-        assert!(!model.post_list_enabled);
-        assert!(model.hide_frontmatter_sidebar);
-    }
-
-    #[test]
-    fn controls_for_project_without_document_enables_project_scoped_controls_only() {
-        let state = EditorState {
-            project: Some(sample_project()),
-            ..Default::default()
-        };
-        let model = controls_for(&state);
-        assert!(model.home_enabled);
-        assert!(model.new_post_enabled);
-        assert!(!model.rename_enabled, "没有打开的文章不该允许重命名");
-        assert!(!model.delete_enabled, "没有打开的文章不该允许删除");
-        assert!(!model.save_enabled);
-        assert!(!model.editor_editable);
-        assert!(model.git_project_available);
-        assert_eq!(
-            model.git_primary_action,
-            git_panel::EffectivePrimaryAction::None
-        );
-        assert!(model.post_list_enabled);
-        assert!(model.hide_frontmatter_sidebar);
-    }
-
-    #[test]
-    fn controls_for_dirty_document_enables_save() {
-        let state = EditorState {
-            project: Some(sample_project()),
-            document: Some(sample_document()),
-            dirty: true,
-            ..Default::default()
-        };
-        let model = controls_for(&state);
-        assert!(model.save_enabled);
-        assert!(model.editor_editable);
-        assert!(model.editor_cursor_visible);
-        assert!(model.frontmatter_panel_enabled);
-        assert!(model.properties_enabled);
-        assert!(model.rename_enabled);
-        assert!(model.delete_enabled);
-        assert!(model.git_dirty);
-        assert!(!model.hide_frontmatter_sidebar);
-    }
-
-    #[test]
-    fn controls_for_clean_document_disables_save_only() {
-        let state = EditorState {
-            project: Some(sample_project()),
-            document: Some(sample_document()),
-            dirty: false,
-            ..Default::default()
-        };
-        let model = controls_for(&state);
-        assert!(!model.save_enabled);
-        assert!(model.editor_editable, "干净的文档仍然可以继续编辑");
-    }
-
-    #[test]
-    fn controls_for_busy_disables_actionable_controls_but_not_read_only_ones() {
-        let state = EditorState {
-            project: Some(sample_project()),
-            document: Some(sample_document()),
-            dirty: true,
-            busy: true,
-            ..Default::default()
-        };
-        let model = controls_for(&state);
-        assert!(!model.open_enabled);
-        assert!(!model.home_enabled);
-        assert!(!model.new_post_enabled);
-        assert!(!model.rename_enabled);
-        assert!(!model.delete_enabled);
-        assert!(!model.save_enabled);
-        assert!(!model.editor_editable);
-        assert!(!model.frontmatter_panel_enabled);
-        assert!(!model.properties_enabled);
-        assert_eq!(
-            model.git_primary_action,
-            git_panel::EffectivePrimaryAction::None
-        );
-        assert!(!model.post_list_enabled);
-        // busy 只挡"会触发新操作"的控件；纯展示性的判断不受它影响。
-        assert!(
-            model.editor_cursor_visible,
-            "光标可见性只看有没有文档，跟 busy 无关"
-        );
-        assert!(
-            model.git_project_available,
-            "git 面板是否可用只看有没有项目，跟 busy 无关"
-        );
-        assert!(!model.hide_frontmatter_sidebar);
-    }
-
-    #[test]
-    fn controls_for_unsaved_documents_blocks_navigation_but_not_the_open_document() {
-        let mut unsaved_documents = HashMap::new();
-        unsaved_documents.insert("other.md".to_string(), sample_document());
-        let state = EditorState {
-            project: Some(sample_project()),
-            document: Some(sample_document()),
-            dirty: true,
-            unsaved_documents,
-            ..Default::default()
-        };
-        let model = controls_for(&state);
-        // 有其它未保存的文章挂着：会离开当前上下文的操作要挡住……
-        assert!(!model.open_enabled);
-        assert!(!model.home_enabled);
-        assert!(!model.new_post_enabled);
-        assert!(!model.rename_enabled);
-        assert!(!model.delete_enabled);
-        // ……但当前正在编辑的这篇文章本身不受影响，不是 busy。
-        assert!(model.save_enabled);
-        assert!(model.editor_editable);
-        assert!(model.frontmatter_panel_enabled);
-        assert!(model.post_list_enabled);
-        assert_eq!(
-            model.git_primary_action,
-            git_panel::EffectivePrimaryAction::SaveBeforeGit { unsaved_count: 1 }
-        );
-    }
-
-    #[test]
-    fn controls_for_clean_current_document_keeps_other_unsaved_state_separate() {
-        let mut unsaved_documents = HashMap::new();
-        unsaved_documents.insert("other.md".to_string(), sample_document());
-        let state = EditorState {
-            project: Some(sample_project()),
-            document: Some(sample_document()),
-            dirty: false,
-            unsaved_documents,
-            ..Default::default()
-        };
-
-        let model = controls_for(&state);
-        assert!(
-            !model.save_enabled,
-            "当前文章干净时不应显示当前文章保存按钮"
-        );
-        assert!(!model.git_dirty, "Git 面板的未保存标记只反映当前文章");
-        assert!(model.editor_editable);
-        assert!(model.post_list_enabled);
-        assert_eq!(
-            model.git_primary_action,
-            git_panel::EffectivePrimaryAction::SaveBeforeGit { unsaved_count: 1 }
         );
     }
 }

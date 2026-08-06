@@ -175,6 +175,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cloudstack-application"
+version = "0.2.4"
+dependencies = [
+ "cloudstack-core",
+]
+
+[[package]]
 name = "cloudstack-core"
 version = "0.2.4"
 dependencies = [
@@ -199,6 +206,7 @@ dependencies = [
 name = "cloudstack-gtk"
 version = "0.2.4"
 dependencies = [
+ "cloudstack-application",
  "cloudstack-core",
  "cloudstack-renderer",
  "fluent-bundle",

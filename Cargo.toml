@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/cloudstack-application",
   "crates/cloudstack-core",
   "crates/cloudstack-gtk",
   "crates/cloudstack-renderer",

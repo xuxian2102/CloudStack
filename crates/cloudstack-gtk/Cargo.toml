@@ -17,6 +17,7 @@ default = []
 e2e = []
 
 [dependencies]
+cloudstack-application = { path = "../cloudstack-application" }
 cloudstack-core = { path = "../cloudstack-core" }
 cloudstack-renderer = { path = "../cloudstack-renderer" }
 gtk = { package = "gtk4", version = "0.11.4", features = ["v4_18"] }

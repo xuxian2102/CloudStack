@@ -1,0 +1,11 @@
+[package]
+name = "cloudstack-application"
+description = "CloudStack 的应用状态机：协调一次用户操作该怎么做，不依赖任何 UI 框架"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+cloudstack-core = { path = "../cloudstack-core" }

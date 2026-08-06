@@ -5,9 +5,9 @@ use cloudstack_core::services::settings::{self, AppSettings, ColorScheme};
 use cloudstack_core::AppError;
 use gtk::glib;
 
-use crate::app::{SettingsWriter, SettingsWriterAction, VersionedSettings};
 use crate::i18n::{self, UiMessage};
 use crate::tasks;
+use cloudstack_application::{SettingsWriter, SettingsWriterAction, VersionedSettings};
 
 use super::{app_data_dir, toast, Widgets};
 

@@ -50,6 +50,21 @@
 
 ## 新增 `cloudstack-application` crate（用户提出，2026-08-07，P1 收尾后的下一步）
 
+**状态：第 1～3 项已完成（分三轮实施，测试数量全程守恒 252，`cargo tree -p cloudstack-application --edges normal` 确认零 GTK/GLib/GIO/Adwaita/WebKit 依赖）。第 4～8 项尚未开始。**
+
+```text
+第 1 轮：新建 crate + 迁移 save/settings/git_refresh          [x] 21 个测试
+第 2 轮：Git 主操作决策迁移（PrimaryGitAction/EffectiveGitAction） [x]  8 个测试
+第 3 轮：ControlModel → WorkspaceCapabilities                [x]  7 个测试
+第 4 项：PreviewCoordinator                                  [ ] 未开始
+第 5 项：Recent 状态协调 / LatestWriteCoordinator             [ ] 未开始
+第 6 项：PublishPlan                                          [ ] 未开始
+第 7 项：DraftCoordinator                                     [ ] 未开始
+第 8 项：OpenWorkspace use case                               [ ] 未开始
+```
+
+依赖方向 `cloudstack-gtk → cloudstack-application → cloudstack-core`（外加 `cloudstack-gtk → cloudstack-renderer → cloudstack-core`）已经是编译期边界，不再只是"目录上的分层"。
+
 P1 基本结束后、在继续加搜索/多标签页等功能前，应该先把应用逻辑从 `cloudstack-gtk` crate 中抽出来，后续维护成本会低很多。
 
 已经迈出的第一步：`crates/cloudstack-gtk/src/app/{save,settings,git_refresh}.rs` 都明确不依赖 GTK，但它们仍然属于 `cloudstack-gtk` crate，目前只是"目录上的分层"，还没有形成编译期边界。
@@ -73,30 +88,11 @@ cloudstack-gtk ───────→ cloudstack-application ─────�
 
 ### 待迁出逻辑，按优先级
 
-1. **`gtk/src/app/{save,settings,git_refresh}.rs`**——原样迁移到 `cloudstack-application/src/{save,settings,task_ticket}.rs`，第一轮只搬文件、不改行为，风险最低。`apply_successful_save()` 参数已经很多（outcome/document/unsaved_documents/dirty/document_id/revision/raw_frontmatter/body），说明下一步应该把它变成 session 方法（`WorkspaceSession::complete_save(&mut self, ticket, result) -> SaveCompletion`），但那是后续步骤，不是这一轮。
+1. [x] **`gtk/src/app/{save,settings,git_refresh}.rs`**——已原样迁移到 `cloudstack-application/src/{save,settings,git_refresh}.rs`（`git_refresh.rs` 保留原名，没有按最初设想改成 `task_ticket.rs`；改名加泛化成通用 `ProjectEpoch + RequestId` 票据抽象是独立的设计决策，留到真的有第二个消费者时再做，不是"原样迁移"这一轮该做的事）。`apply_successful_save()` 参数偏多的问题仍然存在，"收敛成 session 方法"仍是未来步骤，不是这一轮做的。
 
-2. **Git 操作决策**：`git_panel.rs` 里的 `PrimaryAction`/`EffectivePrimaryAction`/`recommended_action()`/`effective_primary_action()`/`prioritized_changes()` 完全不依赖 GTK，本质是"`RepositorySnapshot` + 编辑器状态 → 用户下一步应该做什么"，属于 application policy。迁成 `application::git::{PrimaryGitAction, EffectiveGitAction, recommended_action, effective_action}`，GTK 只负责 `match action { ... set_button_label(...) ... }`。不要迁 `action_label()`、`localized_summary_text()`——那些是 presentation/i18n。
+2. [x] **Git 操作决策**：`recommended_action()`/`effective_primary_action()` 及 `PrimaryAction`/`EffectivePrimaryAction` 已迁入并改名为 `application::git::{PrimaryGitAction, EffectiveGitAction, recommended_action, effective_action}`。`prioritized_changes()`/`MAX_DISPLAYED_CHANGES` **没有迁移**——实施时发现它内置了"Git 面板最多显示 100 行"这个具体面板显示容量策略，属于 presentation 而不是应用状态机，迁过去会让 application crate 从第一天开始承载具体 GTK 面板的显示策略，已按这个边界修正留在 GTK。`action_label()`、`localized_summary_text()` 等 presentation/i18n 一如既往留在 GTK。
 
-3. **整体控件状态模型**：`window.rs` 里的 `ControlModel`/`controls_for(&EditorState)` 应迁入 application，`render_controls(&Widgets, &ControlModel)` 留在 GTK。迁移时把输入收敛成不依赖 GTK `EditorState` 具体结构的独立类型：
-   ```rust
-   pub struct WorkspaceCapabilitiesInput<'a> {
-       pub has_project: bool,
-       pub has_document: bool,
-       pub current_dirty: bool,
-       pub busy: bool,
-       pub unsaved_count: usize,
-       pub git_snapshot: Option<&'a RepositorySnapshot>,
-   }
-   pub struct WorkspaceCapabilities {
-       pub can_open_project: bool,
-       pub can_close_project: bool,
-       pub can_create_post: bool,
-       pub can_save: bool,
-       pub git_action: EffectiveGitAction,
-       // ...
-   }
-   ```
-   目标是 GTK 层最终只剩 `let model = session.capabilities(); widgets.render(model);`。
+3. [x] **整体控件状态模型**：`ControlModel`/`controls_for(&EditorState)` 已迁入 `application::controls::{WorkspaceCapabilitiesInput, WorkspaceCapabilities, capabilities_for}`，`render_controls(&Widgets, &WorkspaceCapabilities)` 留在 GTK。字段名沿用原 `ControlModel` 的命名（`open_enabled`/`home_enabled`/... 而不是这里最初示意的 `can_open_project`/`can_close_project`），减少无谓改名；`git_dirty`/`stable` 两处关键语义原样保留（`git_dirty` 只反映当前文章，不与其他未保存文章混淆；`stable` 只挡导航类操作，当前文档的编辑/保存/frontmatter/文章列表仍只看 `busy`）。`sync_controls()` 把 `EditorState` 的 `RefCell` 借用收窄到只覆盖读取快照那一步，`render_controls()` 触发的 GTK setter 调用不再持有借用。
 
 4. **预览任务状态机**：`preview.rs` 里的 `RenderRequest`/`QueueState`/`QueueState::enqueue()`/`QueueState::finish()`/`should_apply()`/`debounce_duration()` 都是纯 Rust，实现"同时只运行一个 render、pending 只保留最新请求、epoch/generation 不匹配时丢弃旧结果、按文档大小选 debounce 时间"。迁成 `application::preview::{PreviewCoordinator, PreviewRequest, PreviewTicket, PreviewAction}`。GTK 继续保留 `glib::timeout_add_local_once`、`gio::spawn_blocking`、WebKit shell、JS 调用、URI scheme、编辑器与预览滚动同步——application 决定"什么时候启动哪个任务、哪个结果可以应用"，GTK 决定"怎样执行任务和怎样展示"。
 

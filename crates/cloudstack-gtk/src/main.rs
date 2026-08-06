@@ -1,4 +1,3 @@
-mod app;
 mod i18n;
 mod preview;
 mod search;

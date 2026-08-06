@@ -14,9 +14,12 @@ use super::{
     drafts, has_unsaved_documents, open_project, set_busy, show_error, show_user_facing,
     show_user_facing_error, toast, EditorState, Widgets,
 };
-use crate::app::should_apply_git_refresh;
 use crate::i18n::{self, UiMessage};
 use crate::tasks;
+use cloudstack_application::git::{
+    effective_action, recommended_action, EffectiveGitAction, PrimaryGitAction,
+};
+use cloudstack_application::should_apply_git_refresh;
 
 const MAX_DISPLAYED_CHANGES: usize = 100;
 
@@ -39,26 +42,6 @@ pub(super) struct GitPanel {
     split: Rc<RefCell<Option<gtk::Paned>>>,
     expanded: Rc<Cell<bool>>,
     expanded_height: Rc<Cell<i32>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PrimaryAction {
-    None,
-    Initialize,
-    ConfigureIdentity,
-    Commit,
-    ConfigureRemote,
-    PushUpstream,
-    Push,
-    PullFastForward,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum EffectivePrimaryAction {
-    None,
-    NoChanges,
-    SaveBeforeGit { unsaved_count: usize },
-    Git(PrimaryAction),
 }
 
 impl GitPanel {
@@ -295,7 +278,7 @@ impl GitPanel {
             self.refresh_button.set_sensitive(false);
             self.fetch_button.set_sensitive(false);
             self.untrack_config_button.set_visible(false);
-            self.set_primary_action(EffectivePrimaryAction::None);
+            self.set_primary_action(EffectiveGitAction::None);
             return;
         }
         let branch = snapshot.status.branch.as_deref().unwrap_or("—");
@@ -323,7 +306,7 @@ impl GitPanel {
             .set_visible(snapshot.config_tracked);
         self.untrack_config_button
             .set_sensitive(snapshot.config_tracked);
-        self.set_primary_action(EffectivePrimaryAction::Git(recommended_action(snapshot)));
+        self.set_primary_action(EffectiveGitAction::Git(recommended_action(snapshot)));
     }
 
     pub(super) fn set_error(&self, message: &str) {
@@ -340,7 +323,7 @@ impl GitPanel {
         self.refresh_button.set_sensitive(true);
         self.fetch_button.set_sensitive(false);
         self.untrack_config_button.set_visible(false);
-        self.set_primary_action(EffectivePrimaryAction::None);
+        self.set_primary_action(EffectiveGitAction::None);
     }
 
     pub(super) fn set_project_available(&self, available: bool) {
@@ -361,7 +344,7 @@ impl GitPanel {
             set_changes_placeholder(&self.changes_list, &i18n::text(UiMessage::GitNoChanges));
             self.fetch_button.set_sensitive(false);
             self.untrack_config_button.set_visible(false);
-            self.set_primary_action(EffectivePrimaryAction::None);
+            self.set_primary_action(EffectiveGitAction::None);
         }
     }
 
@@ -382,23 +365,23 @@ impl GitPanel {
         }
     }
 
-    pub(super) fn set_primary_action(&self, action: EffectivePrimaryAction) {
+    pub(super) fn set_primary_action(&self, action: EffectiveGitAction) {
         match action {
-            EffectivePrimaryAction::None => {
+            EffectiveGitAction::None => {
                 self.publish_button
                     .set_label(&i18n::text(UiMessage::GitNoAction));
                 self.publish_button
                     .set_tooltip_text(Some(&i18n::text(UiMessage::GitNoActionTooltip)));
                 self.publish_button.set_sensitive(false);
             }
-            EffectivePrimaryAction::NoChanges => {
+            EffectiveGitAction::NoChanges => {
                 self.publish_button
                     .set_label(&i18n::text(UiMessage::GitNoCommittableChanges));
                 self.publish_button
                     .set_tooltip_text(Some(&i18n::text(UiMessage::GitNoCommittableChangesTooltip)));
                 self.publish_button.set_sensitive(false);
             }
-            EffectivePrimaryAction::SaveBeforeGit { unsaved_count } => {
+            EffectiveGitAction::SaveBeforeGit { unsaved_count } => {
                 let label = i18n::text(UiMessage::GitSaveBeforeAction {
                     count: unsaved_count,
                 });
@@ -409,13 +392,13 @@ impl GitPanel {
                 self.publish_button.set_tooltip_text(Some(&tooltip));
                 self.publish_button.set_sensitive(true);
             }
-            EffectivePrimaryAction::Git(action) => {
+            EffectiveGitAction::Git(action) => {
                 let label = compact_action_label(action);
                 let tooltip = action_label(action);
                 self.publish_button.set_label(&label);
                 self.publish_button.set_tooltip_text(Some(&tooltip));
                 self.publish_button
-                    .set_sensitive(action != PrimaryAction::None);
+                    .set_sensitive(action != PrimaryGitAction::None);
             }
         }
     }
@@ -442,107 +425,30 @@ fn git_split_position(minimum: i32, maximum: i32, expanded: bool, desired_height
         .clamp(minimum, maximum)
 }
 
-pub(super) fn recommended_action(snapshot: &RepositorySnapshot) -> PrimaryAction {
-    if !snapshot.environment.git_available
-        || snapshot.worktree.has_conflicts
-        || snapshot.topology == RepositoryTopology::ParentRepository
-        || snapshot.topology == RepositoryTopology::Detached
-        || snapshot.sync == SyncRelation::Diverged
-    {
-        return PrimaryAction::None;
-    }
-    if snapshot.identity.is_none() && snapshot.worktree.managed_changes > 0 {
-        return PrimaryAction::ConfigureIdentity;
-    }
-    match snapshot.topology {
-        RepositoryTopology::NotInitialized => PrimaryAction::Initialize,
-        RepositoryTopology::NoCommit => {
-            if snapshot.worktree.managed_changes > 0 {
-                PrimaryAction::Commit
-            } else {
-                PrimaryAction::None
-            }
-        }
-        RepositoryTopology::NoRemote => {
-            if snapshot.worktree.managed_changes > 0 {
-                PrimaryAction::Commit
-            } else {
-                PrimaryAction::ConfigureRemote
-            }
-        }
-        RepositoryTopology::NoUpstream => {
-            if snapshot.worktree.managed_changes > 0 {
-                PrimaryAction::Commit
-            } else {
-                PrimaryAction::PushUpstream
-            }
-        }
-        RepositoryTopology::Tracking => {
-            if snapshot.status.behind > 0 {
-                if snapshot.status.ahead == 0 && snapshot.worktree.is_clean() {
-                    PrimaryAction::PullFastForward
-                } else {
-                    PrimaryAction::None
-                }
-            } else if snapshot.worktree.managed_changes > 0 {
-                PrimaryAction::Commit
-            } else if snapshot.status.ahead > 0 {
-                PrimaryAction::Push
-            } else {
-                PrimaryAction::None
-            }
-        }
-        RepositoryTopology::ParentRepository | RepositoryTopology::Detached => PrimaryAction::None,
-    }
-}
-
-pub(super) fn effective_primary_action(
-    snapshot: Option<&RepositorySnapshot>,
-    busy: bool,
-    unsaved_count: usize,
-) -> EffectivePrimaryAction {
-    if busy {
-        return EffectivePrimaryAction::None;
-    }
-    if unsaved_count > 0 {
-        return EffectivePrimaryAction::SaveBeforeGit { unsaved_count };
-    }
-    let Some(snapshot) = snapshot else {
-        return EffectivePrimaryAction::None;
-    };
-    if snapshot.topology == RepositoryTopology::NoCommit
-        && snapshot.worktree.managed_changes == 0
-        && !snapshot.worktree.has_conflicts
-    {
-        return EffectivePrimaryAction::NoChanges;
-    }
-    EffectivePrimaryAction::Git(recommended_action(snapshot))
-}
-
-fn action_label(action: PrimaryAction) -> String {
+fn action_label(action: PrimaryGitAction) -> String {
     let message = match action {
-        PrimaryAction::None => UiMessage::GitActionNone,
-        PrimaryAction::Initialize => UiMessage::GitActionInitializeTooltip,
-        PrimaryAction::ConfigureIdentity => UiMessage::GitActionConfigureIdentityTooltip,
-        PrimaryAction::Commit => UiMessage::GitActionCommitTooltip,
-        PrimaryAction::ConfigureRemote => UiMessage::GitActionConfigureRemoteTooltip,
-        PrimaryAction::PushUpstream => UiMessage::GitActionPushUpstreamTooltip,
-        PrimaryAction::Push => UiMessage::GitActionPushTooltip,
-        PrimaryAction::PullFastForward => UiMessage::GitActionPullFastForwardTooltip,
+        PrimaryGitAction::None => UiMessage::GitActionNone,
+        PrimaryGitAction::Initialize => UiMessage::GitActionInitializeTooltip,
+        PrimaryGitAction::ConfigureIdentity => UiMessage::GitActionConfigureIdentityTooltip,
+        PrimaryGitAction::Commit => UiMessage::GitActionCommitTooltip,
+        PrimaryGitAction::ConfigureRemote => UiMessage::GitActionConfigureRemoteTooltip,
+        PrimaryGitAction::PushUpstream => UiMessage::GitActionPushUpstreamTooltip,
+        PrimaryGitAction::Push => UiMessage::GitActionPushTooltip,
+        PrimaryGitAction::PullFastForward => UiMessage::GitActionPullFastForwardTooltip,
     };
     i18n::text(message)
 }
 
-fn compact_action_label(action: PrimaryAction) -> String {
+fn compact_action_label(action: PrimaryGitAction) -> String {
     let message = match action {
-        PrimaryAction::None => UiMessage::GitNoAction,
-        PrimaryAction::Initialize => UiMessage::GitActionInitialize,
-        PrimaryAction::ConfigureIdentity => UiMessage::GitActionConfigureIdentity,
-        PrimaryAction::Commit => UiMessage::GitActionCommit,
-        PrimaryAction::ConfigureRemote => UiMessage::GitActionConfigureRemote,
-        PrimaryAction::PushUpstream => UiMessage::GitActionPushUpstream,
-        PrimaryAction::Push => UiMessage::GitActionPush,
-        PrimaryAction::PullFastForward => UiMessage::GitActionPullFastForward,
+        PrimaryGitAction::None => UiMessage::GitNoAction,
+        PrimaryGitAction::Initialize => UiMessage::GitActionInitialize,
+        PrimaryGitAction::ConfigureIdentity => UiMessage::GitActionConfigureIdentity,
+        PrimaryGitAction::Commit => UiMessage::GitActionCommit,
+        PrimaryGitAction::ConfigureRemote => UiMessage::GitActionConfigureRemote,
+        PrimaryGitAction::PushUpstream => UiMessage::GitActionPushUpstream,
+        PrimaryGitAction::Push => UiMessage::GitActionPush,
+        PrimaryGitAction::PullFastForward => UiMessage::GitActionPullFastForward,
     };
     i18n::text(message)
 }
@@ -834,7 +740,7 @@ fn localized_worktree_text(worktree: WorktreeState) -> String {
 pub(super) fn activate_primary(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     let action = {
         let state = state.borrow();
-        effective_primary_action(
+        effective_action(
             state.git_snapshot.as_ref(),
             state.busy,
             state.unsaved_documents.len(),
@@ -842,22 +748,22 @@ pub(super) fn activate_primary(widgets: &Widgets, state: &Rc<RefCell<EditorState
     };
     let snapshot = state.borrow().git_snapshot.clone();
     match action {
-        EffectivePrimaryAction::None => {
+        EffectiveGitAction::None => {
             if snapshot.is_none() {
                 refresh(widgets, state);
             }
         }
-        EffectivePrimaryAction::NoChanges => {}
-        EffectivePrimaryAction::SaveBeforeGit { .. } => {
+        EffectiveGitAction::NoChanges => {}
+        EffectiveGitAction::SaveBeforeGit { .. } => {
             drafts::save_all(widgets, state);
         }
-        EffectivePrimaryAction::Git(action) => {
+        EffectiveGitAction::Git(action) => {
             let Some(snapshot) = snapshot else {
                 return;
             };
             match action {
-                PrimaryAction::None => {}
-                PrimaryAction::Initialize => confirm_operation(
+                PrimaryGitAction::None => {}
+                PrimaryGitAction::Initialize => confirm_operation(
                     widgets,
                     state,
                     &i18n::text(UiMessage::GitInitHeading),
@@ -866,8 +772,8 @@ pub(super) fn activate_primary(widgets: &Widgets, state: &Rc<RefCell<EditorState
                     Completion::Refresh,
                     |context| git::initialize(&context),
                 ),
-                PrimaryAction::ConfigureIdentity => show_identity_dialog(widgets, state),
-                PrimaryAction::Commit => {
+                PrimaryGitAction::ConfigureIdentity => show_identity_dialog(widgets, state),
+                PrimaryGitAction::Commit => {
                     if gtk::prelude::WidgetExt::activate_action(
                         &widgets.window,
                         "win.publish",
@@ -878,8 +784,8 @@ pub(super) fn activate_primary(widgets: &Widgets, state: &Rc<RefCell<EditorState
                         show_error(widgets, &i18n::text(UiMessage::GitOpenPublishFailed));
                     }
                 }
-                PrimaryAction::ConfigureRemote => show_remote_dialog(widgets, state, &snapshot),
-                PrimaryAction::PushUpstream => confirm_operation(
+                PrimaryGitAction::ConfigureRemote => show_remote_dialog(widgets, state, &snapshot),
+                PrimaryGitAction::PushUpstream => confirm_operation(
                     widgets,
                     state,
                     &i18n::text(UiMessage::GitPushUpstreamHeading),
@@ -888,7 +794,7 @@ pub(super) fn activate_primary(widgets: &Widgets, state: &Rc<RefCell<EditorState
                     Completion::Refresh,
                     |context| git::push_upstream(&context),
                 ),
-                PrimaryAction::Push => confirm_operation(
+                PrimaryGitAction::Push => confirm_operation(
                     widgets,
                     state,
                     &i18n::text(UiMessage::GitPushHeading),
@@ -897,7 +803,7 @@ pub(super) fn activate_primary(widgets: &Widgets, state: &Rc<RefCell<EditorState
                     Completion::Refresh,
                     |context| git::push(&context),
                 ),
-                PrimaryAction::PullFastForward => confirm_operation(
+                PrimaryGitAction::PullFastForward => confirm_operation(
                     widgets,
                     state,
                     &i18n::text(UiMessage::GitPullHeading),
@@ -1557,173 +1463,5 @@ mod tests {
         assert_eq!(git_split_position(100, 700, false, 340), 700);
         assert_eq!(git_split_position(100, 700, true, 340), 360);
         assert_eq!(git_split_position(500, 700, true, 340), 500);
-    }
-
-    #[test]
-    fn primary_action_is_derived_from_orthogonal_state() {
-        assert_eq!(
-            recommended_action(&snapshot(
-                RepositoryTopology::NoRemote,
-                SyncRelation::Unknown,
-                1,
-                0,
-                0,
-                0,
-            )),
-            PrimaryAction::Commit
-        );
-        assert_eq!(
-            recommended_action(&snapshot(
-                RepositoryTopology::Tracking,
-                SyncRelation::Behind,
-                0,
-                0,
-                0,
-                2,
-            )),
-            PrimaryAction::PullFastForward
-        );
-        assert_eq!(
-            recommended_action(&snapshot(
-                RepositoryTopology::Tracking,
-                SyncRelation::Behind,
-                1,
-                0,
-                0,
-                2,
-            )),
-            PrimaryAction::None
-        );
-        assert_eq!(
-            recommended_action(&snapshot(
-                RepositoryTopology::Tracking,
-                SyncRelation::Ahead,
-                0,
-                1,
-                2,
-                0,
-            )),
-            PrimaryAction::Push
-        );
-        assert_eq!(
-            recommended_action(&snapshot(
-                RepositoryTopology::Tracking,
-                SyncRelation::Ahead,
-                1,
-                0,
-                2,
-                0,
-            )),
-            PrimaryAction::Commit
-        );
-    }
-
-    #[test]
-    fn no_commit_with_managed_changes_recommends_commit() {
-        assert_eq!(
-            recommended_action(&snapshot(
-                RepositoryTopology::NoCommit,
-                SyncRelation::Unknown,
-                1,
-                0,
-                0,
-                0,
-            )),
-            PrimaryAction::Commit
-        );
-    }
-
-    #[test]
-    fn no_commit_without_managed_changes_has_no_recommended_action() {
-        assert_eq!(
-            recommended_action(&snapshot(
-                RepositoryTopology::NoCommit,
-                SyncRelation::Unknown,
-                0,
-                0,
-                0,
-                0,
-            )),
-            PrimaryAction::None
-        );
-    }
-
-    #[test]
-    fn no_commit_with_only_unmanaged_changes_has_no_recommended_action() {
-        assert_eq!(
-            recommended_action(&snapshot(
-                RepositoryTopology::NoCommit,
-                SyncRelation::Unknown,
-                0,
-                1,
-                0,
-                0,
-            )),
-            PrimaryAction::None
-        );
-    }
-
-    #[test]
-    fn effective_action_without_managed_changes_explains_disabled_button() {
-        let snapshot = snapshot(
-            RepositoryTopology::NoCommit,
-            SyncRelation::Unknown,
-            0,
-            0,
-            0,
-            0,
-        );
-        assert_eq!(
-            effective_primary_action(Some(&snapshot), false, 0),
-            EffectivePrimaryAction::NoChanges
-        );
-    }
-
-    #[test]
-    fn unsaved_documents_override_repository_action() {
-        let snapshot = snapshot(
-            RepositoryTopology::Tracking,
-            SyncRelation::Ahead,
-            0,
-            0,
-            1,
-            0,
-        );
-        assert_eq!(
-            effective_primary_action(Some(&snapshot), false, 2),
-            EffectivePrimaryAction::SaveBeforeGit { unsaved_count: 2 }
-        );
-    }
-
-    #[test]
-    fn busy_disables_effective_action_before_other_state() {
-        let snapshot = snapshot(
-            RepositoryTopology::Tracking,
-            SyncRelation::Ahead,
-            0,
-            0,
-            1,
-            0,
-        );
-        assert_eq!(
-            effective_primary_action(Some(&snapshot), true, 2),
-            EffectivePrimaryAction::None
-        );
-    }
-
-    #[test]
-    fn clean_editor_uses_repository_action() {
-        let snapshot = snapshot(
-            RepositoryTopology::Tracking,
-            SyncRelation::Ahead,
-            0,
-            0,
-            1,
-            0,
-        );
-        assert_eq!(
-            effective_primary_action(Some(&snapshot), false, 0),
-            EffectivePrimaryAction::Git(PrimaryAction::Push)
-        );
     }
 }
