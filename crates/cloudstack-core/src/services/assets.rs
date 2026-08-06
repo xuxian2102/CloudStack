@@ -57,6 +57,66 @@ impl PendingAssetManager {
             .retain(|entry| entry.project_root != project_root || entry.post_id != post_id);
     }
 
+    /// 保存成功后调用：这篇文章这次保存正文里仍引用的图片停止追踪（文件保留，
+    /// 交还文件系统管理）；不再引用、且内容还是当初粘贴那份的图片按规则删除；
+    /// 不再引用但内容已经被外部程序改过的，跟 `cleanup_pending_asset` 一样只
+    /// 解除追踪、不删文件——不能因为文章保存了就默认图片还是自己的。删除失败
+    /// 保留记录，交给下一次保存/切换项目/关闭项目重试。
+    pub fn reconcile_saved_post(
+        &mut self,
+        project_root: &Path,
+        post_id: &str,
+        saved_body: &str,
+    ) -> Result<usize, AppError> {
+        let mut remaining = Vec::with_capacity(self.entries.len());
+        let mut cleaned = 0;
+        let mut first_error = None;
+
+        for entry in std::mem::take(&mut self.entries) {
+            if entry.project_root != project_root || entry.post_id != post_id {
+                remaining.push(entry);
+                continue;
+            }
+            if markdown_references_image(saved_body, &entry.markdown_path) {
+                // 已经进入这次保存的版本，交给文件系统管理，不再追踪。
+                continue;
+            }
+            let current_path = match verify_pending_file_path(&entry) {
+                Ok(Some(path)) => path,
+                Ok(None) => {
+                    cleaned += 1; // 文件已经不存在，没什么可清理的
+                    continue;
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    remaining.push(entry);
+                    continue;
+                }
+            };
+            let outcome = match content_matches_pending_revision(&entry, &current_path) {
+                Ok(true) => delete_pending_file(&entry, &current_path),
+                Ok(false) => Ok(()), // 内容被外部改过，保留文件，只解除追踪
+                Err(error) => Err(error),
+            };
+            match outcome {
+                Ok(()) => cleaned += 1,
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    remaining.push(entry);
+                }
+            }
+        }
+        self.entries = remaining;
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(cleaned),
+        }
+    }
+
     #[cfg(test)]
     pub fn has_pending(&self, project_root: &Path, post_id: &str) -> bool {
         self.entries
@@ -418,11 +478,12 @@ fn remove_dir_if_empty(dir: &Path) {
     }
 }
 
-fn cleanup_pending_asset(entry: &PendingAsset) -> Result<(), AppError> {
+/// 校验 entry.file_path 没被替换成别的东西；文件已经不存在时返回 `Ok(None)`
+/// （调用方应当当作"没什么可清理的"，不是错误），路径发生可疑变化时返回 `Err`。
+fn verify_pending_file_path(entry: &PendingAsset) -> Result<Option<PathBuf>, AppError> {
     if !entry.file_path.exists() {
-        return Ok(());
+        return Ok(None);
     }
-
     let current_path = entry.file_path.canonicalize()?;
     if current_path != entry.file_path
         || !current_path.starts_with(&entry.content_root)
@@ -433,9 +494,35 @@ fn cleanup_pending_asset(entry: &PendingAsset) -> Result<(), AppError> {
             entry.file_path.display()
         )));
     }
+    Ok(Some(current_path))
+}
 
-    let bytes = fs::read(&current_path)?;
-    if revision_of(&bytes) != entry.revision {
+/// 实际删除文件 + 清理空目录，调用方已经确认过路径安全、且已经决定要删除。
+fn delete_pending_file(entry: &PendingAsset, current_path: &Path) -> Result<(), AppError> {
+    fs::remove_file(current_path)?;
+    if entry.asset_dir.is_dir() && fs::read_dir(&entry.asset_dir)?.next().is_none() {
+        fs::remove_dir(&entry.asset_dir)?;
+    }
+    Ok(())
+}
+
+/// `entry.revision` 是粘贴/拖拽那一刻的图片内容哈希，跟文章自己的 revision
+/// 无关——文章保存不会让它失效。这里读盘比较当前内容是否还是同一份；不一致
+/// 说明文件已经被外部程序改过，不再归这次粘贴事务所有。
+fn content_matches_pending_revision(
+    entry: &PendingAsset,
+    current_path: &Path,
+) -> Result<bool, AppError> {
+    let bytes = fs::read(current_path)?;
+    Ok(revision_of(&bytes) == entry.revision)
+}
+
+fn cleanup_pending_asset(entry: &PendingAsset) -> Result<(), AppError> {
+    let Some(current_path) = verify_pending_file_path(entry)? else {
+        return Ok(());
+    };
+
+    if !content_matches_pending_revision(entry, &current_path)? {
         // 文件被外部修改后就不再归本次粘贴事务所有，保留并解除跟踪。
         return Ok(());
     }
@@ -448,11 +535,7 @@ fn cleanup_pending_asset(entry: &PendingAsset) -> Result<(), AppError> {
         }
     }
 
-    fs::remove_file(&current_path)?;
-    if entry.asset_dir.is_dir() && fs::read_dir(&entry.asset_dir)?.next().is_none() {
-        fs::remove_dir(&entry.asset_dir)?;
-    }
-    Ok(())
+    delete_pending_file(entry, &current_path)
 }
 
 /// 一次批量剪贴板导入中途失败时，只回滚这次已经创建的文件；清理失败的条目返回给
@@ -778,5 +861,141 @@ mod tests {
         pending.confirm_post(&ctx.root, "hello.md");
         assert_eq!(pending.discard_post(&ctx.root, "hello.md").unwrap(), 0);
         assert!(path.is_file());
+    }
+
+    #[test]
+    fn reconcile_saved_post_keeps_file_but_stops_tracking_when_still_referenced() {
+        let (_dir, ctx) = ctx();
+        make_post(&ctx, "hello.md");
+        let saved = save_image(&ctx, "hello.md", Some("a.png"), PNG_MAGIC).unwrap();
+        let path = ctx.content_root.join(&saved.image.markdown_path);
+        let mut pending = PendingAssetManager::default();
+        pending.track(saved.pending.unwrap());
+
+        let saved_body = format!("![]({})", saved.image.markdown_path);
+        assert_eq!(
+            pending
+                .reconcile_saved_post(&ctx.root, "hello.md", &saved_body)
+                .unwrap(),
+            0
+        );
+        assert!(path.is_file());
+        assert!(!pending.has_pending(&ctx.root, "hello.md"));
+    }
+
+    #[test]
+    fn reconcile_saved_post_deletes_file_when_no_longer_referenced() {
+        let (_dir, ctx) = ctx();
+        make_post(&ctx, "hello.md");
+        let kept = save_image(&ctx, "hello.md", Some("a.png"), PNG_MAGIC).unwrap();
+        let dropped = save_image(&ctx, "hello.md", Some("b.png"), PNG_MAGIC).unwrap();
+        let kept_path = ctx.content_root.join(&kept.image.markdown_path);
+        let dropped_path = ctx.content_root.join(&dropped.image.markdown_path);
+        let mut pending = PendingAssetManager::default();
+        pending.track(kept.pending.unwrap());
+        pending.track(dropped.pending.unwrap());
+
+        // 保存后的正文只还引用 a.png，b.png 的引用已经被删掉了。
+        let saved_body = format!("![]({})", kept.image.markdown_path);
+        assert_eq!(
+            pending
+                .reconcile_saved_post(&ctx.root, "hello.md", &saved_body)
+                .unwrap(),
+            1
+        );
+        assert!(kept_path.is_file());
+        assert!(!dropped_path.exists());
+        assert!(!pending.has_pending(&ctx.root, "hello.md"));
+    }
+
+    #[test]
+    fn reconcile_saved_post_retains_entry_when_deletion_fails() {
+        let (_dir, ctx) = ctx();
+        make_post(&ctx, "hello.md");
+        let dropped = save_image(&ctx, "hello.md", Some("b.png"), PNG_MAGIC).unwrap();
+        let asset_dir = ctx.content_root.join("hello");
+        let mut pending = PendingAssetManager::default();
+        pending.track(dropped.pending.unwrap());
+
+        // 去掉资产目录的写权限，让 remove_file 必然失败。
+        let original_mode = fs::metadata(&asset_dir).unwrap().permissions().mode();
+        fs::set_permissions(&asset_dir, fs::Permissions::from_mode(0o500)).unwrap();
+
+        let result = pending.reconcile_saved_post(&ctx.root, "hello.md", "");
+
+        // 恢复权限，否则 TempDir 析构时删不掉这个目录。
+        fs::set_permissions(&asset_dir, fs::Permissions::from_mode(original_mode)).unwrap();
+
+        assert!(result.is_err());
+        assert!(pending.has_pending(&ctx.root, "hello.md"));
+    }
+
+    #[test]
+    fn reconcile_saved_post_ignores_entries_for_other_posts() {
+        let (_dir, ctx) = ctx();
+        make_post(&ctx, "hello.md");
+        make_post(&ctx, "other.md");
+        let this_post = save_image(&ctx, "hello.md", Some("a.png"), PNG_MAGIC).unwrap();
+        let other_post = save_image(&ctx, "other.md", Some("b.png"), PNG_MAGIC).unwrap();
+        let mut pending = PendingAssetManager::default();
+        pending.track(this_post.pending.unwrap());
+        pending.track(other_post.pending.unwrap());
+
+        // 保存的正文完全不引用任何图片；只有 hello.md 名下的条目应该被处理。
+        assert_eq!(
+            pending
+                .reconcile_saved_post(&ctx.root, "hello.md", "no images here")
+                .unwrap(),
+            1
+        );
+        assert!(!pending.has_pending(&ctx.root, "hello.md"));
+        assert!(pending.has_pending(&ctx.root, "other.md"));
+    }
+
+    #[test]
+    fn reconcile_saved_post_ignores_entries_for_other_projects() {
+        let (_dir_a, ctx_a) = ctx();
+        let (_dir_b, ctx_b) = ctx();
+        make_post(&ctx_a, "hello.md");
+        make_post(&ctx_b, "hello.md");
+        let entry_a = save_image(&ctx_a, "hello.md", Some("a.png"), PNG_MAGIC).unwrap();
+        let entry_b = save_image(&ctx_b, "hello.md", Some("b.png"), PNG_MAGIC).unwrap();
+        let mut pending = PendingAssetManager::default();
+        pending.track(entry_a.pending.unwrap());
+        pending.track(entry_b.pending.unwrap());
+
+        // 两个项目都有同名文章 hello.md；只应该处理 ctx_a 名下的条目，
+        // 证明过滤条件真的是 project_root，不只是 post_id 恰好没撞上。
+        assert_eq!(
+            pending
+                .reconcile_saved_post(&ctx_a.root, "hello.md", "no images here")
+                .unwrap(),
+            1
+        );
+        assert!(!pending.has_pending(&ctx_a.root, "hello.md"));
+        assert!(pending.has_pending(&ctx_b.root, "hello.md"));
+    }
+
+    #[test]
+    fn reconcile_saved_post_releases_without_deleting_when_content_was_modified_externally() {
+        let (_dir, ctx) = ctx();
+        make_post(&ctx, "hello.md");
+        let dropped = save_image(&ctx, "hello.md", Some("b.png"), PNG_MAGIC).unwrap();
+        let path = ctx.content_root.join(&dropped.image.markdown_path);
+        let mut pending = PendingAssetManager::default();
+        pending.track(dropped.pending.unwrap());
+
+        // 模拟外部程序在保存前把这张图片的内容换掉了。
+        fs::write(&path, b"modified by another program").unwrap();
+
+        // 保存后的正文不再引用这张图，但内容已经不是当初粘贴的那份，不能删。
+        assert_eq!(
+            pending
+                .reconcile_saved_post(&ctx.root, "hello.md", "")
+                .unwrap(),
+            1
+        );
+        assert!(path.is_file(), "内容被外部改过的文件不应该被删除");
+        assert!(!pending.has_pending(&ctx.root, "hello.md"));
     }
 }

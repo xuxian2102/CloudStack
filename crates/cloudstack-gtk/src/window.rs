@@ -676,10 +676,28 @@ fn ensure_no_unsaved_documents(widgets: &Widgets, state: &Rc<RefCell<EditorState
     true
 }
 
+/// `reconcile_saved_post` 可能因为一次性的 IO 错误把某个 entry 保留下来等重试；
+/// 切换/关闭项目时（此时已经确认没有未保存文章）顺手重试一次。正常情况下这是
+/// 空操作。
+fn retry_pending_asset_cleanup(state: &Rc<RefCell<EditorState>>) {
+    let Some(root) = state
+        .borrow()
+        .project
+        .as_ref()
+        .map(|context| context.root.clone())
+    else {
+        return;
+    };
+    if let Err(error) = state.borrow_mut().pending_assets.discard_project(&root) {
+        log::warn!("重试清理待提交图片失败：{error}");
+    }
+}
+
 fn select_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     if !ensure_no_unsaved_documents(widgets, state) {
         return;
     }
+    retry_pending_asset_cleanup(state);
 
     let dialog = gtk::FileDialog::builder()
         .title("选择博客项目目录")
@@ -713,6 +731,7 @@ fn close_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     if state.borrow().project.is_none() {
         return;
     }
+    retry_pending_asset_cleanup(state);
 
     let mut editor_state = state.borrow_mut();
     editor_state.project = None;
@@ -1261,14 +1280,18 @@ fn save_document_then(
                         {
                             false
                         } else {
+                            if let Err(error) = editor_state.pending_assets.reconcile_saved_post(
+                                &context.root,
+                                &document.id,
+                                &body,
+                            ) {
+                                log::warn!("保存后清理待提交图片失败：{error}");
+                            }
                             if let Some(current) = editor_state.document.as_mut() {
                                 current.raw_frontmatter = raw_frontmatter;
                                 current.body = body;
                                 current.revision = revision;
                             }
-                            editor_state
-                                .pending_assets
-                                .confirm_post(&context.root, &document.id);
                             editor_state.unsaved_documents.remove(&document.id);
                             editor_state.dirty = false;
                             true

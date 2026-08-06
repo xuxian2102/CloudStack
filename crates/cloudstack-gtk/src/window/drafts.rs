@@ -567,9 +567,13 @@ fn complete_batch_save(
         let mut editor_state = state.borrow_mut();
         for document in &report.saved {
             if let Some(project_root) = &project_root {
-                editor_state
-                    .pending_assets
-                    .confirm_post(project_root, &document.id);
+                if let Err(error) = editor_state.pending_assets.reconcile_saved_post(
+                    project_root,
+                    &document.id,
+                    &document.body,
+                ) {
+                    log::warn!("保存后清理待提交图片失败：{error}");
+                }
             }
             editor_state.unsaved_documents.remove(&document.id);
             if editor_state
