@@ -184,7 +184,22 @@ pub(crate) enum UiMessage {
     DiscardFailed {
         details: String,
     },
+    DraftWriteFailed {
+        path: String,
+    },
+    DraftRecoveryFailed {
+        path: String,
+    },
+    DraftDeleteFailed {
+        path: String,
+    },
     RecoveredDraftStatus {
+        path: String,
+    },
+    RecentProjectRemoveFailed {
+        path: String,
+    },
+    RecentProjectPinFailed {
         path: String,
     },
     GitExpandDetails,
@@ -559,7 +574,12 @@ impl UiMessage {
             Self::SaveAndClose => "save-and-close",
             Self::BatchSaveFailed { .. } => "batch-save-failed",
             Self::DiscardFailed { .. } => "discard-failed",
+            Self::DraftWriteFailed { .. } => "draft-write-failed",
+            Self::DraftRecoveryFailed { .. } => "draft-recovery-failed",
+            Self::DraftDeleteFailed { .. } => "draft-delete-failed",
             Self::RecoveredDraftStatus { .. } => "recovered-draft-status",
+            Self::RecentProjectRemoveFailed { .. } => "recent-project-remove-failed",
+            Self::RecentProjectPinFailed { .. } => "recent-project-pin-failed",
             Self::GitExpandDetails => "git-expand-details",
             Self::GitCollapseDetails => "git-collapse-details",
             Self::GitDetailsTitle => "git-details-title",
@@ -757,7 +777,12 @@ impl UiMessage {
             Self::DraftRecoveryAvailable { path }
             | Self::DraftRecoveryDiskChanged { path }
             | Self::UnsavedDocumentOnClose { document: path }
-            | Self::RecoveredDraftStatus { path } => {
+            | Self::RecoveredDraftStatus { path }
+            | Self::DraftWriteFailed { path }
+            | Self::DraftRecoveryFailed { path }
+            | Self::DraftDeleteFailed { path }
+            | Self::RecentProjectRemoveFailed { path }
+            | Self::RecentProjectPinFailed { path } => {
                 HashMap::from([(Cow::Borrowed("path"), FluentValue::from(path.clone()))])
             }
             Self::UnsavedDocumentsOnClose { count, documents } => HashMap::from([
@@ -1062,8 +1087,23 @@ pub(crate) fn message_samples() -> Vec<UiMessage> {
         UiMessage::DiscardFailed {
             details: "notes/a.md：error".to_owned(),
         },
+        UiMessage::DraftWriteFailed {
+            path: "notes/a.md".to_owned(),
+        },
+        UiMessage::DraftRecoveryFailed {
+            path: "notes/a.md".to_owned(),
+        },
+        UiMessage::DraftDeleteFailed {
+            path: "notes/a.md".to_owned(),
+        },
         UiMessage::RecoveredDraftStatus {
             path: "notes/a.md".to_owned(),
+        },
+        UiMessage::RecentProjectRemoveFailed {
+            path: "/tmp/example".to_owned(),
+        },
+        UiMessage::RecentProjectPinFailed {
+            path: "/tmp/example".to_owned(),
         },
         UiMessage::GitExpandDetails,
         UiMessage::GitCollapseDetails,

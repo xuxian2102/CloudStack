@@ -574,7 +574,15 @@ fn handle_completion(
             if let Err(error) = result {
                 let is_current = is_current_post(state, &context_root, &post_id);
                 if is_current {
-                    show_error(widgets, &format!("自动保存草稿失败：{error}"));
+                    super::show_user_facing(
+                        widgets,
+                        i18n::user_facing_message(
+                            UiMessage::DraftWriteFailed {
+                                path: post_id.clone(),
+                            },
+                            error.to_string(),
+                        ),
+                    );
                 }
             }
         }
@@ -594,7 +602,15 @@ fn handle_completion(
             }
             Ok(_) => {}
             Err(error) if can_offer_recovery(state, &document.id, epoch) => {
-                show_error(widgets, &format!("读取自动恢复草稿失败：{error}"));
+                super::show_user_facing(
+                    widgets,
+                    i18n::user_facing_message(
+                        UiMessage::DraftRecoveryFailed {
+                            path: document.relative_path.clone(),
+                        },
+                        error.to_string(),
+                    ),
+                );
             }
             Err(_) => {}
         },
@@ -606,7 +622,15 @@ fn handle_completion(
             if let Err(error) = result {
                 let is_current = is_current_post(state, &context_root, &post_id);
                 if is_current {
-                    show_error(widgets, &format!("清理自动恢复草稿失败：{error}"));
+                    super::show_user_facing(
+                        widgets,
+                        i18n::user_facing_message(
+                            UiMessage::DraftDeleteFailed {
+                                path: post_id.clone(),
+                            },
+                            error.to_string(),
+                        ),
+                    );
                 }
             }
         }

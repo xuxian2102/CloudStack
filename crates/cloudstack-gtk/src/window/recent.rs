@@ -6,7 +6,8 @@ use cloudstack_core::model::PostSummary;
 use cloudstack_core::services::recent::{self, RecentProject};
 use cloudstack_core::services::settings;
 
-use super::{app_data_dir, load_document, open_project, show_error, EditorState, Widgets};
+use super::{app_data_dir, load_document, open_project, show_user_facing, EditorState, Widgets};
+use crate::i18n::{self, UiMessage};
 use crate::tasks;
 
 /// 冷启动时调用一次，填充欢迎页的最近项目列表。
@@ -196,13 +197,20 @@ pub(super) fn touch(project_root: &Path) {
 
 fn remove_async(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, project_root: &Path) {
     let root = project_root.to_path_buf();
+    let display_path = root.display().to_string();
     let complete_widgets = widgets.clone();
     let complete_state = Rc::clone(state);
     tasks::run(
         move || recent::remove(&app_data_dir(), &root),
         move |result| match result {
             Ok(projects) => bind(&complete_widgets, &complete_state, &projects),
-            Err(error) => show_error(&complete_widgets, &format!("移除最近项目失败：{error}")),
+            Err(error) => show_user_facing(
+                &complete_widgets,
+                i18n::user_facing_message(
+                    UiMessage::RecentProjectRemoveFailed { path: display_path },
+                    error.to_string(),
+                ),
+            ),
         },
     );
 }
@@ -214,13 +222,20 @@ fn set_pinned_async(
     pinned: bool,
 ) {
     let root = project_root.to_path_buf();
+    let display_path = root.display().to_string();
     let complete_widgets = widgets.clone();
     let complete_state = Rc::clone(state);
     tasks::run(
         move || recent::set_pinned(&app_data_dir(), &root, pinned),
         move |result| match result {
             Ok(projects) => bind(&complete_widgets, &complete_state, &projects),
-            Err(error) => show_error(&complete_widgets, &format!("更新固定状态失败：{error}")),
+            Err(error) => show_user_facing(
+                &complete_widgets,
+                i18n::user_facing_message(
+                    UiMessage::RecentProjectPinFailed { path: display_path },
+                    error.to_string(),
+                ),
+            ),
         },
     );
 }

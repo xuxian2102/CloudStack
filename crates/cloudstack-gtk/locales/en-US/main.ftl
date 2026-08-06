@@ -158,7 +158,12 @@ batch-save-failed = The following articles could not be saved; the window will r
     { $details }
 discard-failed = Recovery drafts for the following articles could not be removed; the window will remain open:
     { $details }
+draft-write-failed = Could not autosave the draft for “{ $path }”; the article can still be edited
+draft-recovery-failed = Could not read the recovery draft for “{ $path }”
+draft-delete-failed = Could not remove the recovery draft for “{ $path }”
 recovered-draft-status = { $path } · Recovered draft, unsaved
+recent-project-remove-failed = Could not remove “{ $path }” from recent projects
+recent-project-pin-failed = Could not update the pinned state for “{ $path }”
 git-expand-details = Expand Git details
 git-collapse-details = Collapse Git details
 git-details-title = Git details

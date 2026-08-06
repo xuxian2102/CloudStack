@@ -150,7 +150,12 @@ batch-save-failed = 以下文章保存失败，窗口保持打开：
     { $details }
 discard-failed = 以下文章的自动恢复草稿未能清理，窗口保持打开：
     { $details }
+draft-write-failed = 自动保存“{ $path }”的草稿失败，文章仍可继续编辑
+draft-recovery-failed = 无法读取“{ $path }”的自动恢复草稿
+draft-delete-failed = 无法清理“{ $path }”的自动恢复草稿
 recovered-draft-status = { $path } · 已恢复草稿，未保存
+recent-project-remove-failed = 无法从最近项目中移除“{ $path }”
+recent-project-pin-failed = 无法更新项目“{ $path }”的固定状态
 git-expand-details = 展开 Git 详情
 git-collapse-details = 收起 Git 详情
 git-details-title = Git 详情
