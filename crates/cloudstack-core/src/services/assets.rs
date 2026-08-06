@@ -909,25 +909,26 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_saved_post_retains_entry_when_deletion_fails() {
+    fn reconcile_saved_post_retains_entry_when_asset_cannot_be_read() {
         let (_dir, ctx) = ctx();
         make_post(&ctx, "hello.md");
         let dropped = save_image(&ctx, "hello.md", Some("b.png"), PNG_MAGIC).unwrap();
         let asset_dir = ctx.content_root.join("hello");
+        let file_path = ctx.content_root.join(&dropped.image.markdown_path);
         let mut pending = PendingAssetManager::default();
         pending.track(dropped.pending.unwrap());
 
-        // 去掉资产目录的写权限，让 remove_file 必然失败。
-        let original_mode = fs::metadata(&asset_dir).unwrap().permissions().mode();
-        fs::set_permissions(&asset_dir, fs::Permissions::from_mode(0o500)).unwrap();
+        // 用同名目录替换图片文件。读取目录会稳定返回错误，不依赖测试进程是否
+        // 以 root 运行，也不会因为删除成功后清理了父目录而影响测试收尾。
+        fs::remove_file(&file_path).unwrap();
+        fs::create_dir(&file_path).unwrap();
 
         let result = pending.reconcile_saved_post(&ctx.root, "hello.md", "");
 
-        // 恢复权限，否则 TempDir 析构时删不掉这个目录。
-        fs::set_permissions(&asset_dir, fs::Permissions::from_mode(original_mode)).unwrap();
-
         assert!(result.is_err());
         assert!(pending.has_pending(&ctx.root, "hello.md"));
+        fs::remove_dir(&file_path).unwrap();
+        assert!(asset_dir.is_dir());
     }
 
     #[test]
