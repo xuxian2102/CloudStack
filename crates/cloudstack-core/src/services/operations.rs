@@ -277,22 +277,39 @@ fn validate_bare_file_name(name: &str) -> Result<(), AppError> {
 /// 没做的部分。资产目录本身也是当场用当前 `ctx` 重新推导（重新走一遍
 /// `resolve_post_path`/`asset_dir_for_post` 里的路径守卫），不信任 journal
 /// 里可能是旧版本或者被篡改过的绝对路径。
+///
+/// 没有图片意图（`asset_names` 为空）时完全不碰同名 stem 目录——纯文章重命名
+/// 不应该因为一个跟这次操作无关的同名目录（哪怕它现在是个符号链接）被挡住。
 fn apply_rename_recovery(
     ctx: &ProjectContext,
     operation: &RenameOperation,
 ) -> Result<(), AppError> {
-    let old_asset_dir = asset_dir_for_post(ctx, &operation.old_id)?;
-    let new_asset_dir = asset_dir_for_post(ctx, &operation.new_id)?;
-    validate_asset_directory(ctx, &old_asset_dir)?;
-    validate_asset_directory(ctx, &new_asset_dir)?;
-
     let mut asset_moves = Vec::with_capacity(operation.asset_names.len());
-    for name in &operation.asset_names {
-        validate_bare_file_name(name)?;
-        let source = old_asset_dir.join(name);
-        let target = new_asset_dir.join(name);
-        let state = classify_move_state(&source, &target, "图片")?;
-        asset_moves.push((source, target, state));
+    let mut old_asset_dir = None;
+
+    if !operation.asset_names.is_empty() {
+        let resolved_old_asset_dir = asset_dir_for_post(ctx, &operation.old_id)?;
+        let new_asset_dir = asset_dir_for_post(ctx, &operation.new_id)?;
+        validate_asset_directory(ctx, &resolved_old_asset_dir)?;
+        validate_asset_directory(ctx, &new_asset_dir)?;
+
+        // 篡改/损坏的 journal 可能包含重复文件名：预扫描阶段两项都会分类成
+        // Pending，真正执行时第一项成功、第二项才因为 target 已存在而失败，
+        // 变成"校验全部通过后仍然只部分执行"。在这里一次性拒绝，不留这个口子。
+        let mut seen = std::collections::BTreeSet::new();
+        for name in &operation.asset_names {
+            validate_bare_file_name(name)?;
+            if !seen.insert(name.as_str()) {
+                return Err(AppError::Io(format!(
+                    "操作日志包含重复的图片文件名：{name:?}"
+                )));
+            }
+            let source = resolved_old_asset_dir.join(name);
+            let target = new_asset_dir.join(name);
+            let state = classify_move_state(&source, &target, "图片")?;
+            asset_moves.push((source, target, state));
+        }
+        old_asset_dir = Some(resolved_old_asset_dir);
     }
 
     let old_path = resolve_post_path(&ctx.content_root, &ctx.config.extensions, &operation.old_id)?;
@@ -316,7 +333,9 @@ fn apply_rename_recovery(
 
     // 走到这里，两种分类结果都已经确保 new_path 现在是普通文件。
     posts::reapply_colocated_image_rewrite(&new_path, &operation.old_id, &operation.new_id)?;
-    posts::remove_dir_if_empty(&old_asset_dir);
+    if let Some(old_asset_dir) = old_asset_dir {
+        posts::remove_dir_if_empty(&old_asset_dir);
+    }
 
     Ok(())
 }
@@ -765,6 +784,84 @@ mod tests {
         assert!(
             outside.join("cover.png").is_file(),
             "项目外的文件不应该被移动"
+        );
+        assert!(!ctx.content_root.join("world/cover.png").exists());
+    }
+
+    #[test]
+    fn recover_post_only_ignores_unrelated_asset_directory() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let root = project_dir.path().canonicalize().unwrap();
+        let ctx = ctx_in(&root);
+        make_post(
+            &ctx,
+            "hello.md",
+            "---\ntitle: x\n---\nbody without any image\n",
+        );
+
+        // "hello" 目录（跟 hello.md 同名 stem）被换成了一个跟这次重命名完全
+        // 无关的符号链接——这次操作根本没有图片意图（journal 里 asset_names
+        // 是空的），不应该因为这个不相关的目录被挡住。
+        let outside = outside_dir.path().canonicalize().unwrap();
+        std::os::unix::fs::symlink(&outside, ctx.content_root.join("hello")).unwrap();
+
+        let journal =
+            write_rename_journal(app_data.path(), &ctx, "hello.md", "world.md", &[]).unwrap();
+
+        let recovered = recover_pending_renames(app_data.path(), &ctx);
+        assert_eq!(
+            recovered,
+            vec![RecoveredRename {
+                old_id: "hello.md".into(),
+                new_id: "world.md".into(),
+            }],
+            "没有资产意图时，不相关的同名符号链接目录不应该阻塞纯文章恢复"
+        );
+        assert!(!journal.exists());
+        assert!(ctx.content_root.join("world.md").is_file());
+    }
+
+    #[test]
+    fn recover_rejects_duplicate_asset_names_before_moving_anything() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let root = project_dir.path().canonicalize().unwrap();
+        let ctx = ctx_in(&root);
+        make_post(
+            &ctx,
+            "hello.md",
+            "---\ntitle: x\n---\n![](hello/cover.png)\n",
+        );
+        fs::create_dir_all(ctx.content_root.join("hello")).unwrap();
+        fs::write(ctx.content_root.join("hello/cover.png"), b"first").unwrap();
+
+        // 篡改/损坏的 journal 可能出现两个不同来源目录派生出同一个文件名的
+        // 情况（这里用两个不同的 source 目录、相同文件名模拟）。
+        let asset_moves = vec![
+            (
+                ctx.content_root.join("hello/cover.png"),
+                ctx.content_root.join("world/cover.png"),
+            ),
+            (
+                ctx.content_root.join("elsewhere/cover.png"),
+                ctx.content_root.join("world/cover.png"),
+            ),
+        ];
+        let journal =
+            write_rename_journal(app_data.path(), &ctx, "hello.md", "world.md", &asset_moves)
+                .unwrap();
+
+        let recovered = recover_pending_renames(app_data.path(), &ctx);
+        assert!(recovered.is_empty());
+        assert!(
+            journal.is_file(),
+            "重复文件名必须在移动任何文件之前就整体拒绝"
+        );
+        assert!(
+            ctx.content_root.join("hello/cover.png").is_file(),
+            "校验阶段就该失败，不应该移动任何文件"
         );
         assert!(!ctx.content_root.join("world/cover.png").exists());
     }
