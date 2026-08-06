@@ -179,6 +179,7 @@ name = "cloudstack-application"
 version = "0.2.4"
 dependencies = [
  "cloudstack-core",
+ "tempfile",
 ]
 
 [[package]]
@@ -216,7 +217,6 @@ dependencies = [
  "libadwaita",
  "log",
  "sourceview5",
- "tempfile",
  "unic-langid",
  "webkit6",
 ]

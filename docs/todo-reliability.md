@@ -50,7 +50,7 @@
 
 ## 新增 `cloudstack-application` crate（用户提出，2026-08-07，P1 收尾后的下一步）
 
-**状态：第 1～6 项已完成（分六轮实施，测试数量全程守恒可核对到 266，`cargo tree -p cloudstack-application --edges normal` 确认零 GTK/GLib/GIO/Adwaita/WebKit 依赖，且不依赖 `cloudstack-renderer`）。第 7～8 项尚未开始。**
+**状态：第 1～7 项已全部完成（第 7 项拆成 7A/7B/7C 三轮，理由见下）。测试数量全程守恒可核对到 275，`cargo tree -p cloudstack-application --edges normal` 确认零 GTK/GLib/GIO/Adwaita/WebKit 依赖，且不依赖 `cloudstack-renderer`。第 8 项尚未开始。**
 
 ```text
 第 1 轮：新建 crate + 迁移 save/settings/git_refresh          [x] 21 个测试
@@ -59,7 +59,9 @@
 第 4 轮：PreviewCoordinator（含"撤销覆盖预览"正确性修复）      [x]  4 个测试
 第 5 轮：Recent 状态协调（恢复选择规则 + LastDocumentWriter）  [x] 11 个测试
 第 6 轮：PublishPlan                                          [x]  8 个测试
-第 7 项：DraftCoordinator                                     [ ] 未开始
+第 7A 轮：草稿存储策略 + 批量保存/丢弃 use case               [x]  7 个测试
+第 7B 轮：FIFO Coordinator + DraftOperation/DraftCompletion   [x]  4 个测试
+第 7C 轮：恢复资格判定 + 草稿比较策略                          [x]  5 个测试
 第 8 项：OpenWorkspace use case                               [ ] 未开始
 ```
 
@@ -127,15 +129,37 @@ cloudstack-gtk ───────→ cloudstack-application ─────�
 
    **测试**：8 个测试全部按预期迁入/新增（`nested_article_wins_over_an_outer_asset_directory` 从 GTK 迁移，其余 7 个为新增：`publish_plan_groups_article_and_colocated_assets`、`deleted_article_is_still_exposed_as_an_article_choice`、`excluded_articles_start_unselected_but_other_managed_paths_remain_selected`、`renamed_article_submission_includes_old_and_new_paths`、`submission_uses_current_selection_and_updates_exclusions`、`conflicts_behind_and_no_managed_changes_block_submission`、`working_empty_message_and_empty_selection_block_submission`）。`cloudstack-application` 51 → 59（+8），`cloudstack-gtk` 因为迁走了那一个测试 44 → 43（-1），workspace 总数 259 → 266（application 59、core 155、gtk 43、renderer 9），与预期完全吻合，没有偏差需要说明。
 
-7. **草稿队列和批量保存**：`window/drafts.rs` 是目前 GTK 层最值得拆、同时改动也最大的一块，混合了草稿主目录/旧目录回退、FIFO operation queue、single-flight 执行、批量保存/丢弃、草稿恢复资格判断、completion 后更新 session、对话框和 toast。建议拆成：
+7. **草稿队列和批量保存**：`window/drafts.rs` 是目前 GTK 层最值得拆、同时改动也最大的一块，混合了草稿主目录/旧目录回退、FIFO operation queue、single-flight 执行、批量保存/丢弃、草稿恢复资格判断、completion 后更新 session、对话框和 toast。体量比前几项大得多，拆成 7A/7B/7C 三轮独立提交：
    ```text
    application/src/drafts/
-     storage.rs       // primary + legacy 策略
-     coordinator.rs   // FIFO/single-flight
-     batch.rs         // save/discard reports
-     recovery.rs      // 是否可提示恢复
+     mod.rs            // pub use，不重新导出到 crate 根
+     storage.rs        // primary + legacy 策略（7A）
+     batch.rs          // save/discard reports（7A）
+     coordinator.rs    // FIFO/single-flight（7B）
+     recovery.rs        // 是否可提示恢复（7C）
    ```
-   GTK 只保留 700ms `glib::SourceId` timer、恢复对话框、toast、从 SourceView 读取当前正文。`save_documents()`/`discard_documents()` 已经是完整 application use case，不应继续放在 GTK 文件里。
+
+   **7A（已完成）**：`DraftStorage`（`new`/`read`/`write`/`delete`，字段私有）和 `BatchFailure`/`BatchSaveReport`/`DiscardReport`/`save_documents`/`discard_documents` 已迁入 `cloudstack-application/src/drafts/{storage,batch}.rs`，`mod.rs` 用私有 `mod storage; mod batch;` + `pub use` 把类型拍平到 `cloudstack_application::drafts::` 一层（不是 `drafts::storage::`），风格上对齐 `publish::`/`recent::` 那种"域名一层就到类型"的引用方式；`lib.rs` 只加了 `pub mod drafts;`，没有再重新导出到 crate 根。
+
+   按用户要求修正了一处边界：原来 `cleanup_warnings: Vec<String>` 直接生成中文整句（"{path}：文章已保存，但清理自动恢复草稿失败：{error}"），迁移后改成结构化的 `DraftCleanupWarning { relative_path, error }`，本地化文案组装挪到 GTK 侧新增的 `cleanup_warning_text()`。
+
+   GTK 侧 `draft_storage()`（依赖 `glib::user_data_dir()`/`APPLICATION_ID`/`LEGACY_APPLICATION_ID`/`e2e` 环境变量）保留在 GTK，只是改成调用 `DraftStorage::new(primary, legacy)`；`DraftQueue`/`Operation`/`Completion`/`pump()`/`can_offer_recovery()`/`is_current_post()` 全部原样保留在 GTK，7A 完全没有碰队列和恢复 policy。`tempfile` dev-dependency 跟着测试从 `cloudstack-gtk/Cargo.toml` 移到了 `cloudstack-application/Cargo.toml`（GTK 里已经没有别的地方用它）。
+
+   **测试**：原 `drafts.rs` 最后 7 个测试全部迁移，3 个进 `storage.rs`（`primary_draft_wins_and_legacy_is_the_fallback`、`writing_primary_removes_the_matching_legacy_draft`、`deleting_a_draft_clears_both_storage_locations`），4 个进 `batch.rs`（`batch_save_writes_each_snapshot_and_clears_its_draft`、`batch_save_keeps_external_conflict_as_a_failed_article`、`batch_save_keeps_success_and_failure_independent`、`batch_discard_removes_all_recovery_drafts`）。因为 `DraftStorage` 字段对 `batch` 模块不可见（只有 `storage` 子模块内部能访问私有字段），`batch.rs` 测试里原来直接写 `storage.primary` 路径的两处改成了通过公开的 `storage.write(...)` 方法落一份已存在的草稿，效果一致（`base_revision` 统一用字面量 `"revision"`，其中一处原来用的是 `failed.revision.clone()`，但两种写法下该字段都不影响这几个测试的断言，只是最小化迁移代码量的取舍）。`cloudstack-application` 59 → 66（+7），`cloudstack-gtk` 43 → 36（-7），workspace 总数 266 不变（application 66、core 155、gtk 36、renderer 9），与预期完全吻合。
+
+   **7B（已完成）**：`DraftCoordinator`（ticket 化的 FIFO 单飞队列，`DraftTicket`/`DraftTask`/`DraftAction`）+ `DraftOperation`/`DraftCompletion`（从原来 GTK 私有的 `Operation`/`Completion` 改名迁入，字段和 `execute()`/`closes_window()` 原样保留）已迁入 `cloudstack-application/src/drafts/coordinator.rs`。`DraftAction::Execute` 按 clippy `large_enum_variant` 的提示包了一层 `Box<DraftTask>`（`DraftTask` 里嵌着 `DraftOperation`，最大变体 360+ 字节，跟零大小的 `None` 变体放在同一个 enum 里会触发这条 lint），这是规格之外补的一处必要改动。
+
+   GTK 侧 `DraftQueue` 现在只剩 `{ coordinator: DraftCoordinator, timer: Option<glib::SourceId> }`；`enqueue()` 改成 `coordinator.enqueue(operation)` 拿到 `DraftAction` 后交给新增的 `dispatch_action()`；原来的 `pump()` 删除。按规格严格保证了顺序：`dispatch_action()` 的 completion 回调里先跑 `handle_completion()`（可能在其中触发新的 `enqueue_delete(...)`，此时 `coordinator.active` 还没释放，新操作只会排进 `pending`，不会抢跑），再用 `handle_completion()` 的返回值作为 `stop_queue` 调用 `coordinator.complete(ticket, stop_queue)`，用返回的下一个 `DraftAction` 递归调 `dispatch_action()`。这比原来"先在回调里无条件把 `active` 置回 `false`、再跑 `handle_completion()`、依赖同步重入的 `pump()` 把新 enqueue 的操作立刻启动"的写法更显式——原来的写法能工作是因为单线程 GTK 主循环里的重入巧合，不是设计出来的顺序保证。
+
+   **测试**：新增 4 个，均按预期命名：`first_operation_starts_immediately`、`queued_operations_preserve_fifo_order`、`mismatched_completion_does_not_release_active_operation`、`stopping_after_completion_discards_remaining_queue`。`cloudstack-application` 66 → 70（+4），`cloudstack-gtk` 不变（`Operation`/`Completion` 整体搬走但没有测试跟着搬——原 `drafts.rs` 测试模块已经在 7A 整体迁完），workspace 总数 266 → 270，与预期完全吻合。
+
+   **7C（已完成）**：`DraftRecoveryEligibilityInput`/`can_offer_recovery`（恢复资格判定，按计划加了 project root 校验——原来只查 busy/dirty/epoch/post id，现在补上第 5 项"root + epoch 双校验"同样的原则）、`CurrentDraftTargetInput`/`is_current_draft_target`（写入/删除失败要不要展示给用户，只看 root + post id，不看 busy/dirty/epoch）、`DraftRecoveryDecision`/`classify_recovery`（草稿与磁盘内容是否一致 → 直接清掉 `DeleteRedundant`，否则 `Offer { disk_changed_since_draft }`）已迁入 `cloudstack-application/src/drafts/recovery.rs`。
+
+   GTK 侧 `is_current_post`/`can_offer_recovery` 保留原名作为薄封装（后者新增了 `project_root` 参数），内部只是从 `EditorState` 组出 input 结构体转发给 application 函数；`handle_completion()` 里原来内联的"内容相同就删、否则弹对话框"判断改成 `match classify_recovery(&document, &draft)`；`show_recovery_dialog()` 新增 `disk_changed_since_draft: bool` 参数（调用方已经知道分类结果，不用再在对话框内部重新比较 `draft.base_revision == document.revision`），对话框构建、两个响应回调、本地化文案原样留在 GTK；"restore"/"disk"两个响应闭包调用 `can_offer_recovery` 时补上了 `context.root`（"restore" 闭包额外克隆了一份 `restore_root`，因为 `context` 本体要移进后定义的"disk"闭包）。
+
+   **测试**：新增 5 个，均按预期命名：`recovery_requires_idle_matching_project_post_and_epoch`（一次性覆盖 busy/dirty/root/post-id/epoch 五个否决条件，风格上对齐 `project_reopen_is_blocked_when_disabled_or_workspace_is_not_idle` 这类既有的组合测试，没有拆成 5 个独立测试函数）、`identical_draft_is_deleted_without_prompt`、`matching_base_revision_offers_normal_recovery`、`changed_base_revision_offers_disk_changed_warning`、`current_draft_target_requires_both_root_and_post_id`。`cloudstack-application` 70 → 75（+5），`cloudstack-gtk` 不变，workspace 总数 270 → 275，与预期完全吻合。
+
+   第 7 项至此全部完成：`drafts.rs` 不再拥有存储策略、批量 use case、FIFO 队列、恢复 policy 这四类应用状态机，只保留 700ms 定时器、SourceView 读取、对话框、toast/status 展示这些确实只对当前 GTK 界面有意义的部分。
 
 8. **项目打开 use case**：`open_project()` 后台任务做的 `project::open_project → ensure_local_config_excluded → recover_pending_renames → list_posts` 四步、以及 `Opened`/`NeedsInitialization`/`NeedsContentRepair` 的区分，是一个完整 application use case。迁成 `pub fn open_workspace(root: &Path, app_data_dir: &Path) -> Result<OpenWorkspaceOutcome, AppError>`，GTK 的 `open_project()` 变成"读取文件选择器结果 → 后台调用 `open_workspace()` → 根据 outcome 展示 workspace/初始化对话框/修复对话框"。文章 create/rename/delete 中"执行操作后重新 `list_posts`"的组合也可以随后迁入。
 

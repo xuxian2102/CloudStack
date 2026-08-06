@@ -5,6 +5,7 @@
 //! 渲染回界面。
 
 pub mod controls;
+pub mod drafts;
 pub mod git;
 pub mod git_refresh;
 pub mod preview;

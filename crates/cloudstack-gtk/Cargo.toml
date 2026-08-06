@@ -31,4 +31,3 @@ webkit = { package = "webkit6", version = "0.6.1" }
 
 [dev-dependencies]
 fluent-syntax = "0.12.0"
-tempfile = "3"

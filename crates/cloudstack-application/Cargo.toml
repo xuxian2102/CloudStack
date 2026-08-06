@@ -9,3 +9,6 @@ authors.workspace = true
 
 [dependencies]
 cloudstack-core = { path = "../cloudstack-core" }
+
+[dev-dependencies]
+tempfile = "3"

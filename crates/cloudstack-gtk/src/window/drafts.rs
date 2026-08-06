@@ -1,13 +1,16 @@
 use std::cell::RefCell;
-use std::collections::VecDeque;
+#[cfg(feature = "e2e")]
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
 use adw::prelude::*;
+use cloudstack_application::drafts::{
+    self, classify_recovery, BatchSaveReport, CurrentDraftTargetInput, DiscardReport, DraftAction,
+    DraftCleanupWarning, DraftCompletion, DraftCoordinator, DraftOperation, DraftRecoveryDecision,
+    DraftRecoveryEligibilityInput, DraftStorage,
+};
 use cloudstack_core::model::{DraftDocument, PostDocument, ProjectContext};
-use cloudstack_core::services::{drafts, posts};
-use cloudstack_core::AppError;
 
 use super::{set_busy, show_error, sync_controls, toast, EditorState, Widgets};
 use crate::i18n::{self, UiMessage};
@@ -15,294 +18,26 @@ use crate::tasks;
 
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(700);
 
-#[derive(Debug, Clone)]
-struct DraftStorage {
-    primary: PathBuf,
-    legacy: Option<PathBuf>,
-}
-
-impl DraftStorage {
-    fn read(
-        &self,
-        context: &ProjectContext,
-        post_id: &str,
-    ) -> Result<Option<DraftDocument>, AppError> {
-        if let Some(draft) = drafts::read(&self.primary, context, post_id)? {
-            return Ok(Some(draft));
-        }
-        match &self.legacy {
-            Some(legacy) => drafts::read(legacy, context, post_id),
-            None => Ok(None),
-        }
-    }
-
-    fn write(
-        &self,
-        context: &ProjectContext,
-        post_id: &str,
-        raw_frontmatter: Option<String>,
-        body: String,
-        base_revision: String,
-    ) -> Result<(), AppError> {
-        drafts::write(
-            &self.primary,
-            context,
-            post_id,
-            raw_frontmatter,
-            body,
-            base_revision,
-        )?;
-        if let Some(legacy) = &self.legacy {
-            drafts::delete(legacy, context, post_id)?;
-        }
-        Ok(())
-    }
-
-    fn delete(&self, context: &ProjectContext, post_id: &str) -> Result<(), AppError> {
-        // 两次删除都必须执行，避免一个目录的错误令另一个目录留下会再次出现的旧草稿。
-        let primary_result = drafts::delete(&self.primary, context, post_id);
-        let legacy_result = self
-            .legacy
-            .as_ref()
-            .map_or(Ok(()), |legacy| drafts::delete(legacy, context, post_id));
-        primary_result.and(legacy_result)
-    }
-}
-
-pub(super) struct BatchFailure {
-    pub relative_path: String,
-    pub error: String,
-}
-
-pub(super) struct BatchSaveReport {
-    pub saved: Vec<PostDocument>,
-    pub failed: Vec<BatchFailure>,
-    pub cleanup_warnings: Vec<String>,
-}
-
-pub(super) struct DiscardReport {
-    pub discarded: Vec<String>,
-    pub failed: Vec<BatchFailure>,
-}
-
 #[derive(Default)]
 pub(super) struct DraftQueue {
-    active: bool,
-    pending: VecDeque<Operation>,
+    coordinator: DraftCoordinator,
     timer: Option<gtk::glib::SourceId>,
-}
-
-enum Operation {
-    Write {
-        storage: DraftStorage,
-        context: ProjectContext,
-        post_id: String,
-        raw_frontmatter: Option<String>,
-        body: String,
-        base_revision: String,
-    },
-    Read {
-        storage: DraftStorage,
-        context: ProjectContext,
-        document: PostDocument,
-        epoch: u64,
-    },
-    Delete {
-        storage: DraftStorage,
-        context: ProjectContext,
-        post_id: String,
-    },
-    SaveAndClose {
-        storage: DraftStorage,
-        context: ProjectContext,
-        documents: Vec<PostDocument>,
-    },
-    SaveAll {
-        storage: DraftStorage,
-        context: ProjectContext,
-        documents: Vec<PostDocument>,
-    },
-    DiscardAndClose {
-        storage: DraftStorage,
-        context: ProjectContext,
-        documents: Vec<PostDocument>,
-    },
-}
-
-enum Completion {
-    Written {
-        context_root: PathBuf,
-        post_id: String,
-        result: Result<(), AppError>,
-    },
-    Read {
-        context: Box<ProjectContext>,
-        document: PostDocument,
-        epoch: u64,
-        result: Result<Option<DraftDocument>, AppError>,
-    },
-    Deleted {
-        context_root: PathBuf,
-        post_id: String,
-        result: Result<(), AppError>,
-    },
-    BatchSaved {
-        report: BatchSaveReport,
-        close_window: bool,
-    },
-    Discarded(DiscardReport),
-}
-
-impl Operation {
-    fn closes_window(&self) -> bool {
-        matches!(
-            self,
-            Self::SaveAndClose { .. } | Self::DiscardAndClose { .. }
-        )
-    }
-
-    fn execute(self) -> Completion {
-        match self {
-            Self::Write {
-                storage,
-                context,
-                post_id,
-                raw_frontmatter,
-                body,
-                base_revision,
-            } => {
-                let result =
-                    storage.write(&context, &post_id, raw_frontmatter, body, base_revision);
-                Completion::Written {
-                    context_root: context.root,
-                    post_id,
-                    result,
-                }
-            }
-            Self::Read {
-                storage,
-                context,
-                document,
-                epoch,
-            } => {
-                let result = storage.read(&context, &document.id);
-                Completion::Read {
-                    context: Box::new(context),
-                    document,
-                    epoch,
-                    result,
-                }
-            }
-            Self::Delete {
-                storage,
-                context,
-                post_id,
-            } => {
-                let result = storage.delete(&context, &post_id);
-                Completion::Deleted {
-                    context_root: context.root,
-                    post_id,
-                    result,
-                }
-            }
-            Self::SaveAndClose {
-                storage,
-                context,
-                documents,
-            } => Completion::BatchSaved {
-                report: save_documents(&storage, &context, documents),
-                close_window: true,
-            },
-            Self::SaveAll {
-                storage,
-                context,
-                documents,
-            } => Completion::BatchSaved {
-                report: save_documents(&storage, &context, documents),
-                close_window: false,
-            },
-            Self::DiscardAndClose {
-                storage,
-                context,
-                documents,
-            } => Completion::Discarded(discard_documents(&storage, &context, documents)),
-        }
-    }
-}
-
-fn save_documents(
-    storage: &DraftStorage,
-    context: &ProjectContext,
-    documents: Vec<PostDocument>,
-) -> BatchSaveReport {
-    let mut report = BatchSaveReport {
-        saved: Vec::new(),
-        failed: Vec::new(),
-        cleanup_warnings: Vec::new(),
-    };
-    for document in documents {
-        match posts::write_post(
-            context,
-            &document.id,
-            document.raw_frontmatter.as_deref(),
-            &document.body,
-            &document.revision,
-        ) {
-            Ok(revision) => {
-                let mut saved = document;
-                saved.revision = revision;
-                if let Err(error) = storage.delete(context, &saved.id) {
-                    report.cleanup_warnings.push(format!(
-                        "{}：文章已保存，但清理自动恢复草稿失败：{error}",
-                        saved.relative_path
-                    ));
-                }
-                report.saved.push(saved);
-            }
-            Err(error) => report.failed.push(BatchFailure {
-                relative_path: document.relative_path,
-                error: error.to_string(),
-            }),
-        }
-    }
-    report
-}
-
-fn discard_documents(
-    storage: &DraftStorage,
-    context: &ProjectContext,
-    documents: Vec<PostDocument>,
-) -> DiscardReport {
-    let mut report = DiscardReport {
-        discarded: Vec::new(),
-        failed: Vec::new(),
-    };
-    for document in documents {
-        match storage.delete(context, &document.id) {
-            Ok(()) => report.discarded.push(document.id),
-            Err(error) => report.failed.push(BatchFailure {
-                relative_path: document.relative_path,
-                error: error.to_string(),
-            }),
-        }
-    }
-    report
 }
 
 fn draft_storage() -> DraftStorage {
     #[cfg(feature = "e2e")]
     if let Some(path) = std::env::var_os("CLOUDSTACK_E2E_DATA_DIR") {
-        return DraftStorage {
-            primary: PathBuf::from(path),
-            legacy: std::env::var_os("CLOUDSTACK_E2E_LEGACY_DATA_DIR").map(PathBuf::from),
-        };
+        return DraftStorage::new(
+            PathBuf::from(path),
+            std::env::var_os("CLOUDSTACK_E2E_LEGACY_DATA_DIR").map(PathBuf::from),
+        );
     }
 
     let user_data = gtk::glib::user_data_dir();
-    DraftStorage {
-        primary: user_data.join(crate::APPLICATION_ID),
-        legacy: Some(user_data.join(crate::LEGACY_APPLICATION_ID)),
-    }
+    DraftStorage::new(
+        user_data.join(crate::APPLICATION_ID),
+        Some(user_data.join(crate::LEGACY_APPLICATION_ID)),
+    )
 }
 
 pub(super) fn schedule(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
@@ -331,7 +66,7 @@ pub(super) fn inspect_loaded_document(
     enqueue(
         widgets,
         state,
-        Operation::Read {
+        DraftOperation::Read {
             storage: draft_storage(),
             context,
             document,
@@ -377,7 +112,7 @@ pub(super) fn save_and_close(widgets: &Widgets, state: &Rc<RefCell<EditorState>>
     enqueue(
         widgets,
         state,
-        Operation::SaveAndClose {
+        DraftOperation::SaveAndClose {
             storage: draft_storage(),
             context,
             documents,
@@ -413,7 +148,7 @@ pub(super) fn save_all(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     enqueue(
         widgets,
         state,
-        Operation::SaveAll {
+        DraftOperation::SaveAll {
             storage: draft_storage(),
             context,
             documents,
@@ -452,7 +187,7 @@ pub(super) fn discard_and_close(widgets: &Widgets, state: &Rc<RefCell<EditorStat
     enqueue(
         widgets,
         state,
-        Operation::DiscardAndClose {
+        DraftOperation::DiscardAndClose {
             storage: draft_storage(),
             context,
             documents,
@@ -489,7 +224,7 @@ fn enqueue_current_snapshot(widgets: &Widgets, state: &Rc<RefCell<EditorState>>)
     enqueue(
         widgets,
         state,
-        Operation::Write {
+        DraftOperation::Write {
             storage: draft_storage(),
             context,
             post_id: document.id,
@@ -509,7 +244,7 @@ fn enqueue_delete(
     enqueue(
         widgets,
         state,
-        Operation::Delete {
+        DraftOperation::Delete {
             storage: draft_storage(),
             context,
             post_id,
@@ -517,44 +252,44 @@ fn enqueue_delete(
     );
 }
 
-fn enqueue(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, operation: Operation) {
-    state.borrow_mut().draft_queue.pending.push_back(operation);
-    pump(widgets, state);
+fn enqueue(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, operation: DraftOperation) {
+    let action = state
+        .borrow_mut()
+        .draft_queue
+        .coordinator
+        .enqueue(operation);
+    dispatch_action(widgets, state, action);
 }
 
-fn pump(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
-    let operation = {
-        let mut state = state.borrow_mut();
-        if state.draft_queue.active {
-            return;
-        }
-        let Some(operation) = state.draft_queue.pending.pop_front() else {
-            return;
-        };
-        state.draft_queue.active = true;
-        operation
+fn dispatch_action(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, action: DraftAction) {
+    let DraftAction::Execute(task) = action else {
+        return;
     };
-    let closes_window = operation.closes_window();
+
+    let ticket = task.ticket;
+    let closes_window = task.operation.closes_window();
     let widgets = widgets.clone();
     let state = Rc::clone(state);
     tasks::run(
-        move || Ok(operation.execute()),
+        move || Ok(task.operation.execute()),
         move |result| {
-            state.borrow_mut().draft_queue.active = false;
-            match result {
-                Ok(completion) => {
-                    if handle_completion(&widgets, &state, completion) {
-                        return;
-                    }
-                }
+            let stop_queue = match result {
+                Ok(completion) => handle_completion(&widgets, &state, completion),
                 Err(error) => {
                     if closes_window {
                         set_busy(&widgets, &state, false, "");
                     }
                     super::show_user_facing_error(&widgets, &error);
+                    false
                 }
-            }
-            pump(&widgets, &state);
+            };
+
+            let next = state
+                .borrow_mut()
+                .draft_queue
+                .coordinator
+                .complete(ticket, stop_queue);
+            dispatch_action(&widgets, &state, next);
         },
     );
 }
@@ -563,10 +298,10 @@ fn pump(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
 fn handle_completion(
     widgets: &Widgets,
     state: &Rc<RefCell<EditorState>>,
-    completion: Completion,
+    completion: DraftCompletion,
 ) -> bool {
     match completion {
-        Completion::Written {
+        DraftCompletion::Written {
             context_root,
             post_id,
             result,
@@ -586,22 +321,34 @@ fn handle_completion(
                 }
             }
         }
-        Completion::Read {
+        DraftCompletion::Read {
             context,
             document,
             epoch,
             result,
         } => match result {
-            Ok(Some(draft)) if can_offer_recovery(state, &document.id, epoch) => {
-                if draft.raw_frontmatter == document.raw_frontmatter && draft.body == document.body
-                {
-                    delete_for_post(widgets, state, *context, document.id);
-                } else {
-                    show_recovery_dialog(widgets, state, *context, document, draft, epoch);
+            Ok(Some(draft)) if can_offer_recovery(state, &context.root, &document.id, epoch) => {
+                match classify_recovery(&document, &draft) {
+                    DraftRecoveryDecision::DeleteRedundant => {
+                        delete_for_post(widgets, state, *context, document.id);
+                    }
+                    DraftRecoveryDecision::Offer {
+                        disk_changed_since_draft,
+                    } => {
+                        show_recovery_dialog(
+                            widgets,
+                            state,
+                            *context,
+                            document,
+                            draft,
+                            epoch,
+                            disk_changed_since_draft,
+                        );
+                    }
                 }
             }
             Ok(_) => {}
-            Err(error) if can_offer_recovery(state, &document.id, epoch) => {
+            Err(error) if can_offer_recovery(state, &context.root, &document.id, epoch) => {
                 super::show_user_facing(
                     widgets,
                     i18n::user_facing_message(
@@ -614,7 +361,7 @@ fn handle_completion(
             }
             Err(_) => {}
         },
-        Completion::Deleted {
+        DraftCompletion::Deleted {
             context_root,
             post_id,
             result,
@@ -634,11 +381,11 @@ fn handle_completion(
                 }
             }
         }
-        Completion::BatchSaved {
+        DraftCompletion::BatchSaved {
             report,
             close_window,
         } => return complete_batch_save(widgets, state, report, close_window),
-        Completion::Discarded(report) => return complete_discard(widgets, state, report),
+        DraftCompletion::Discarded(report) => return complete_discard(widgets, state, report),
     }
     false
 }
@@ -696,8 +443,8 @@ fn complete_batch_save(
     }
 
     if report.failed.is_empty() {
-        for warning in report.cleanup_warnings {
-            log::warn!("{warning}");
+        for warning in &report.cleanup_warnings {
+            log::warn!("{}", cleanup_warning_text(warning));
         }
         set_busy(widgets, state, false, "");
         if close_window {
@@ -716,10 +463,23 @@ fn complete_batch_save(
         .collect::<Vec<_>>()
         .join("\n");
     if !report.cleanup_warnings.is_empty() {
-        log::warn!("{}", report.cleanup_warnings.join("；"));
+        let warnings = report
+            .cleanup_warnings
+            .iter()
+            .map(cleanup_warning_text)
+            .collect::<Vec<_>>()
+            .join("；");
+        log::warn!("{warnings}");
     }
     show_error(widgets, &i18n::text(UiMessage::BatchSaveFailed { details }));
     false
+}
+
+fn cleanup_warning_text(warning: &DraftCleanupWarning) -> String {
+    format!(
+        "{}：文章已保存，但清理自动恢复草稿失败：{}",
+        warning.relative_path, warning.error
+    )
 }
 
 fn complete_discard(
@@ -768,25 +528,31 @@ fn is_current_post(
     post_id: &str,
 ) -> bool {
     let state = state.borrow();
-    state
-        .project
-        .as_ref()
-        .is_some_and(|context| context.root == context_root)
-        && state
-            .document
-            .as_ref()
-            .is_some_and(|document| document.id == post_id)
+    drafts::is_current_draft_target(CurrentDraftTargetInput {
+        expected_project_root: context_root,
+        current_project_root: state.project.as_ref().map(|context| context.root.as_path()),
+        expected_post_id: post_id,
+        current_post_id: state.document.as_ref().map(|document| document.id.as_str()),
+    })
 }
 
-fn can_offer_recovery(state: &Rc<RefCell<EditorState>>, post_id: &str, epoch: u64) -> bool {
+fn can_offer_recovery(
+    state: &Rc<RefCell<EditorState>>,
+    project_root: &std::path::Path,
+    post_id: &str,
+    epoch: u64,
+) -> bool {
     let state = state.borrow();
-    !state.busy
-        && !state.dirty
-        && state.document_epoch == epoch
-        && state
-            .document
-            .as_ref()
-            .is_some_and(|document| document.id == post_id)
+    drafts::can_offer_recovery(DraftRecoveryEligibilityInput {
+        busy: state.busy,
+        dirty: state.dirty,
+        expected_project_root: project_root,
+        current_project_root: state.project.as_ref().map(|context| context.root.as_path()),
+        expected_post_id: post_id,
+        current_post_id: state.document.as_ref().map(|document| document.id.as_str()),
+        expected_epoch: epoch,
+        current_epoch: state.document_epoch,
+    })
 }
 
 fn show_recovery_dialog(
@@ -796,13 +562,14 @@ fn show_recovery_dialog(
     document: PostDocument,
     draft: DraftDocument,
     epoch: u64,
+    disk_changed_since_draft: bool,
 ) {
-    let body = if draft.base_revision == document.revision {
-        i18n::text(UiMessage::DraftRecoveryAvailable {
+    let body = if disk_changed_since_draft {
+        i18n::text(UiMessage::DraftRecoveryDiskChanged {
             path: document.relative_path.clone(),
         })
     } else {
-        i18n::text(UiMessage::DraftRecoveryDiskChanged {
+        i18n::text(UiMessage::DraftRecoveryAvailable {
             path: document.relative_path.clone(),
         })
     };
@@ -822,8 +589,9 @@ fn show_recovery_dialog(
     let restore_widgets = widgets.clone();
     let restore_state = Rc::clone(state);
     let restore_document = document.clone();
+    let restore_root = context.root.clone();
     dialog.connect_response(Some("restore"), move |_, _| {
-        if !can_offer_recovery(&restore_state, &restore_document.id, epoch) {
+        if !can_offer_recovery(&restore_state, &restore_root, &restore_document.id, epoch) {
             return;
         }
         {
@@ -854,7 +622,7 @@ fn show_recovery_dialog(
     let disk_widgets = widgets.clone();
     let disk_state = Rc::clone(state);
     dialog.connect_response(Some("disk"), move |_, _| {
-        if can_offer_recovery(&disk_state, &document.id, epoch) {
+        if can_offer_recovery(&disk_state, &context.root, &document.id, epoch) {
             delete_for_post(
                 &disk_widgets,
                 &disk_state,
@@ -864,184 +632,4 @@ fn show_recovery_dialog(
         }
     });
     dialog.present(Some(&widgets.window));
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use cloudstack_core::model::ProjectConfig;
-
-    fn fixture() -> (
-        tempfile::TempDir,
-        tempfile::TempDir,
-        ProjectContext,
-        DraftStorage,
-    ) {
-        let project = tempfile::tempdir().unwrap();
-        let app_data = tempfile::tempdir().unwrap();
-        let root = project.path().canonicalize().unwrap();
-        std::fs::write(root.join("a.md"), "disk\n").unwrap();
-        let context = ProjectContext {
-            root: root.clone(),
-            content_root: root.clone(),
-            config_path: root.join(".cloudstack.json"),
-            config: ProjectConfig::default(),
-        };
-        let storage = DraftStorage {
-            primary: app_data.path().join("dev.xuxian.cloudstack"),
-            legacy: Some(app_data.path().join("dev.xuxian.blogeditor")),
-        };
-        (project, app_data, context, storage)
-    }
-
-    fn write_at(path: &std::path::Path, context: &ProjectContext, body: &str) {
-        drafts::write(
-            path,
-            context,
-            "a.md",
-            None,
-            body.to_owned(),
-            "revision".into(),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn primary_draft_wins_and_legacy_is_the_fallback() {
-        let (_project, _app_data, context, storage) = fixture();
-        let legacy = storage.legacy.as_ref().unwrap();
-        write_at(legacy, &context, "legacy");
-        assert_eq!(
-            storage.read(&context, "a.md").unwrap().unwrap().body,
-            "legacy"
-        );
-
-        write_at(&storage.primary, &context, "primary");
-        assert_eq!(
-            storage.read(&context, "a.md").unwrap().unwrap().body,
-            "primary"
-        );
-    }
-
-    #[test]
-    fn writing_primary_removes_the_matching_legacy_draft() {
-        let (_project, _app_data, context, storage) = fixture();
-        let legacy = storage.legacy.as_ref().unwrap();
-        write_at(legacy, &context, "legacy");
-
-        storage
-            .write(&context, "a.md", None, "primary".into(), "revision".into())
-            .unwrap();
-
-        assert!(drafts::read(legacy, &context, "a.md").unwrap().is_none());
-        assert_eq!(
-            storage.read(&context, "a.md").unwrap().unwrap().body,
-            "primary"
-        );
-    }
-
-    #[test]
-    fn deleting_a_draft_clears_both_storage_locations() {
-        let (_project, _app_data, context, storage) = fixture();
-        let legacy = storage.legacy.as_ref().unwrap();
-        write_at(&storage.primary, &context, "primary");
-        write_at(legacy, &context, "legacy");
-
-        storage.delete(&context, "a.md").unwrap();
-
-        assert!(drafts::read(&storage.primary, &context, "a.md")
-            .unwrap()
-            .is_none());
-        assert!(drafts::read(legacy, &context, "a.md").unwrap().is_none());
-    }
-
-    #[test]
-    fn batch_save_writes_each_snapshot_and_clears_its_draft() {
-        let (project, _app_data, context, storage) = fixture();
-        std::fs::write(context.root.join("b.md"), "old b\n").unwrap();
-        let mut first = posts::read_post(&context, "a.md").unwrap();
-        let mut second = posts::read_post(&context, "b.md").unwrap();
-        first.body = "new a\n".into();
-        second.body = "new b\n".into();
-        write_at(&storage.primary, &context, "new a\n");
-
-        let report = save_documents(&storage, &context, vec![first, second]);
-
-        assert!(report.failed.is_empty());
-        assert_eq!(report.saved.len(), 2);
-        assert_eq!(
-            std::fs::read_to_string(project.path().join("a.md")).unwrap(),
-            "new a\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(project.path().join("b.md")).unwrap(),
-            "new b\n"
-        );
-        assert!(storage.read(&context, "a.md").unwrap().is_none());
-    }
-
-    #[test]
-    fn batch_save_keeps_external_conflict_as_a_failed_article() {
-        let (_project, _app_data, context, storage) = fixture();
-        let mut document = posts::read_post(&context, "a.md").unwrap();
-        document.body = "edited\n".into();
-        std::fs::write(context.root.join("a.md"), "changed elsewhere\n").unwrap();
-
-        let report = save_documents(&storage, &context, vec![document]);
-
-        assert!(report.saved.is_empty());
-        assert_eq!(report.failed.len(), 1);
-        assert_eq!(report.failed[0].relative_path, "a.md");
-        assert!(report.failed[0].error.contains("外部"));
-    }
-
-    #[test]
-    fn batch_save_keeps_success_and_failure_independent() {
-        let (project, _app_data, context, storage) = fixture();
-        std::fs::write(context.root.join("b.md"), "old b\n").unwrap();
-        let mut saved = posts::read_post(&context, "a.md").unwrap();
-        let mut failed = posts::read_post(&context, "b.md").unwrap();
-        saved.body = "new a\n".into();
-        failed.body = "new b\n".into();
-        drafts::write(
-            &storage.primary,
-            &context,
-            "b.md",
-            None,
-            failed.body.clone(),
-            failed.revision.clone(),
-        )
-        .unwrap();
-        std::fs::write(context.root.join("b.md"), "changed elsewhere\n").unwrap();
-
-        let report = save_documents(&storage, &context, vec![saved, failed]);
-
-        assert_eq!(report.saved.len(), 1);
-        assert_eq!(report.saved[0].id, "a.md");
-        assert_eq!(report.failed.len(), 1);
-        assert_eq!(report.failed[0].relative_path, "b.md");
-        assert_eq!(
-            std::fs::read_to_string(project.path().join("a.md")).unwrap(),
-            "new a\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(project.path().join("b.md")).unwrap(),
-            "changed elsewhere\n"
-        );
-        assert!(storage.read(&context, "a.md").unwrap().is_none());
-        assert!(storage.read(&context, "b.md").unwrap().is_some());
-    }
-
-    #[test]
-    fn batch_discard_removes_all_recovery_drafts() {
-        let (_project, _app_data, context, storage) = fixture();
-        write_at(&storage.primary, &context, "discard me");
-        let document = posts::read_post(&context, "a.md").unwrap();
-
-        let report = discard_documents(&storage, &context, vec![document]);
-
-        assert_eq!(report.discarded, vec!["a.md"]);
-        assert!(report.failed.is_empty());
-        assert!(storage.read(&context, "a.md").unwrap().is_none());
-    }
 }
