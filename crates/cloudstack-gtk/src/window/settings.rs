@@ -1,11 +1,31 @@
 use std::cell::RefCell;
-use std::rc::Rc;
 
 use adw::prelude::*;
 use cloudstack_core::services::settings::{self, AppSettings, ColorScheme};
+use cloudstack_core::AppError;
+use gtk::glib;
+
+use crate::app::{SettingsWriter, SettingsWriterAction, VersionedSettings};
+use crate::tasks;
 
 use super::{app_data_dir, toast, Widgets};
-use crate::tasks;
+
+/// 共享设置写者的生命周期。冷启动读盘完成前，`show_dialog` 会保持沉默，
+/// 避免用户在默认值上修改、把磁盘上的真实设置冲掉。
+enum SettingsRuntime {
+    Uninitialized,
+    Loading,
+    Ready(SettingsWriter),
+}
+
+thread_local! {
+    static SETTINGS_RUNTIME: RefCell<SettingsRuntime> =
+        const { RefCell::new(SettingsRuntime::Uninitialized) };
+    /// 设置对话框单例：已经打开就重新 present 它，不再建第二个——两个对话
+    /// 框各自的控件没有互相同步机制，允许并存只会让其中一个显示过期的值。
+    static SETTINGS_DIALOG: RefCell<Option<glib::WeakRef<adw::PreferencesDialog>>> =
+        const { RefCell::new(None) };
+}
 
 fn to_adw_color_scheme(scheme: ColorScheme) -> adw::ColorScheme {
     match scheme {
@@ -19,49 +39,115 @@ fn apply_color_scheme(scheme: ColorScheme) {
     adw::StyleManager::default().set_color_scheme(to_adw_color_scheme(scheme));
 }
 
-fn save_async(widgets: &Widgets, settings: AppSettings) {
-    let widgets = widgets.clone();
-    tasks::run(
-        move || settings::save(&app_data_dir(), &settings),
-        move |result| {
-            if let Err(error) = result {
-                log::warn!("保存设置失败：{error}");
-                toast(&widgets, &format!("保存设置失败：{error}"));
-            }
-        },
-    );
+fn dialog_may_open(runtime: &SettingsRuntime) -> bool {
+    matches!(runtime, SettingsRuntime::Ready(_))
 }
 
-/// 冷启动调用一次：读设置、应用到 AdwStyleManager。不需要 Widgets/EditorState——
-/// 只碰全局的 StyleManager，跟窗口状态无关。
-pub(super) fn load_and_apply_async() {
+/// 冷启动调用一次：异步读一次设置，用它初始化共享的 `SettingsWriter` 并把
+/// 配色应用到 `AdwStyleManager`。
+pub(super) fn load_and_initialize() {
+    SETTINGS_RUNTIME.with(|runtime| *runtime.borrow_mut() = SettingsRuntime::Loading);
     tasks::run(
         || Ok(settings::load(&app_data_dir())),
-        |result: Result<AppSettings, cloudstack_core::AppError>| {
-            if let Ok(loaded) = result {
-                apply_color_scheme(loaded.color_scheme);
-            }
+        |result: Result<AppSettings, AppError>| {
+            let Ok(loaded) = result else {
+                log::warn!("加载设置失败，设置入口本次会话保持不可用");
+                return;
+            };
+            apply_color_scheme(loaded.color_scheme);
+            SETTINGS_RUNTIME.with(|runtime| {
+                *runtime.borrow_mut() = SettingsRuntime::Ready(SettingsWriter::new(loaded));
+            });
         },
     );
 }
 
-/// 打开设置对话框；先异步读一次当前完整设置再建 UI，这样两个控件的变化处理器
-/// 才能"读旧值改一个字段再存盘"，不会互相覆盖对方刚存的字段。
+/// 所有设置修改的唯一入口：直接改共享 writer 的内存快照，再按它的判定决定
+/// 要不要派发一次写盘。
+fn update_settings(widgets: &Widgets, edit: impl FnOnce(&mut AppSettings)) {
+    let action = SETTINGS_RUNTIME.with(|runtime| {
+        let mut runtime = runtime.borrow_mut();
+        let SettingsRuntime::Ready(writer) = &mut *runtime else {
+            return SettingsWriterAction::None;
+        };
+        writer.update(edit)
+    });
+    dispatch_settings_action(widgets, action);
+}
+
+fn dispatch_settings_action(widgets: &Widgets, action: SettingsWriterAction) {
+    if let SettingsWriterAction::Persist(versioned) = action {
+        dispatch_settings_write(widgets, versioned);
+    }
+}
+
+fn dispatch_settings_write(widgets: &Widgets, versioned: VersionedSettings) {
+    let generation = versioned.generation;
+    let snapshot = versioned.snapshot;
+    let widgets = widgets.clone();
+    tasks::run(
+        move || settings::save(&app_data_dir(), &snapshot),
+        move |result| complete_settings_write(&widgets, generation, result),
+    );
+}
+
+fn complete_settings_write(widgets: &Widgets, generation: u64, result: Result<(), AppError>) {
+    if let Err(error) = &result {
+        log::warn!("保存设置失败：{error}");
+    }
+    let success = result.is_ok();
+    let transition = SETTINGS_RUNTIME.with(|runtime| {
+        let mut runtime = runtime.borrow_mut();
+        let SettingsRuntime::Ready(writer) = &mut *runtime else {
+            return Default::default();
+        };
+        writer.complete_write(generation, success)
+    });
+    if transition.report_failure {
+        if let Err(error) = &result {
+            toast(widgets, &format!("保存设置失败：{error}"));
+        }
+    }
+    if let Some(next) = transition.next_write {
+        dispatch_settings_write(widgets, next);
+    }
+}
+
+/// 打开设置对话框。已经有一个开着就重新 present 它；否则确认共享设置已经
+/// 加载完成（见 `dialog_may_open`），顺带把上一次失败、还没被后续修改顶掉
+/// 的写入重新排一次队，再用 writer 当前的权威快照建对话框。
 pub(super) fn show_dialog(widgets: &Widgets) {
-    let widgets = widgets.clone();
-    tasks::run(
-        || Ok(settings::load(&app_data_dir())),
-        move |result: Result<AppSettings, cloudstack_core::AppError>| {
-            build_and_present_dialog(&widgets, result.unwrap_or_default());
-        },
-    );
+    let existing =
+        SETTINGS_DIALOG.with(|dialog| dialog.borrow().as_ref().and_then(glib::WeakRef::upgrade));
+    if let Some(dialog) = existing {
+        dialog.present(Some(&widgets.window));
+        return;
+    }
+
+    let ready = SETTINGS_RUNTIME.with(|runtime| dialog_may_open(&runtime.borrow()));
+    if !ready {
+        return;
+    }
+
+    let retry_action = SETTINGS_RUNTIME.with(|runtime| {
+        let mut runtime = runtime.borrow_mut();
+        let SettingsRuntime::Ready(writer) = &mut *runtime else {
+            unreachable!("刚确认过 dialog_may_open，GTK 单线程下状态不会被别的代码改掉");
+        };
+        writer.retry_failed_write()
+    });
+    dispatch_settings_action(widgets, retry_action);
+
+    let current = SETTINGS_RUNTIME.with(|runtime| match &*runtime.borrow() {
+        SettingsRuntime::Ready(writer) => writer.current().clone(),
+        _ => unreachable!("刚确认过 dialog_may_open，GTK 单线程下状态不会被别的代码改掉"),
+    });
+    build_and_present_dialog(widgets, current);
 }
 
 fn build_and_present_dialog(widgets: &Widgets, current: AppSettings) {
-    let current = Rc::new(RefCell::new(current));
-
     let model = gtk::StringList::new(&["跟随系统", "浅色", "深色"]);
-    let selected_index = match current.borrow().color_scheme {
+    let selected_index = match current.color_scheme {
         ColorScheme::System => 0,
         ColorScheme::Light => 1,
         ColorScheme::Dark => 2,
@@ -73,7 +159,6 @@ fn build_and_present_dialog(widgets: &Widgets, current: AppSettings) {
         .build();
 
     let color_scheme_widgets = widgets.clone();
-    let color_scheme_current = Rc::clone(&current);
     color_scheme_row.connect_selected_notify(move |row| {
         let scheme = match row.selected() {
             1 => ColorScheme::Light,
@@ -81,46 +166,37 @@ fn build_and_present_dialog(widgets: &Widgets, current: AppSettings) {
             _ => ColorScheme::System,
         };
         apply_color_scheme(scheme);
-        let updated = AppSettings {
-            color_scheme: scheme,
-            ..color_scheme_current.borrow().clone()
-        };
-        *color_scheme_current.borrow_mut() = updated.clone();
-        save_async(&color_scheme_widgets, updated);
+        update_settings(&color_scheme_widgets, |settings| {
+            settings.color_scheme = scheme
+        });
     });
 
     let auto_reopen_row = adw::SwitchRow::builder()
         .title("启动时自动打开最近项目")
         .subtitle("跳过欢迎页，直接进入最后一次打开的项目")
-        .active(current.borrow().auto_reopen_last_project)
+        .active(current.auto_reopen_last_project)
         .build();
 
     let auto_reopen_widgets = widgets.clone();
-    let auto_reopen_current = Rc::clone(&current);
     auto_reopen_row.connect_active_notify(move |row| {
-        let updated = AppSettings {
-            auto_reopen_last_project: row.is_active(),
-            ..auto_reopen_current.borrow().clone()
-        };
-        *auto_reopen_current.borrow_mut() = updated.clone();
-        save_async(&auto_reopen_widgets, updated);
+        let active = row.is_active();
+        update_settings(&auto_reopen_widgets, move |settings| {
+            settings.auto_reopen_last_project = active;
+        });
     });
 
     let restore_document_row = adw::SwitchRow::builder()
         .title("打开项目时跳回上次打开的文章")
         .subtitle("记住每个项目最后打开的文章")
-        .active(current.borrow().restore_last_document_on_open)
+        .active(current.restore_last_document_on_open)
         .build();
 
     let restore_document_widgets = widgets.clone();
-    let restore_document_current = Rc::clone(&current);
     restore_document_row.connect_active_notify(move |row| {
-        let updated = AppSettings {
-            restore_last_document_on_open: row.is_active(),
-            ..restore_document_current.borrow().clone()
-        };
-        *restore_document_current.borrow_mut() = updated.clone();
-        save_async(&restore_document_widgets, updated);
+        let active = row.is_active();
+        update_settings(&restore_document_widgets, move |settings| {
+            settings.restore_last_document_on_open = active;
+        });
     });
 
     let appearance_group = adw::PreferencesGroup::builder().title("外观").build();
@@ -136,5 +212,20 @@ fn build_and_present_dialog(widgets: &Widgets, current: AppSettings) {
 
     let dialog = adw::PreferencesDialog::builder().title("设置").build();
     dialog.add(&page);
+    SETTINGS_DIALOG.with(|cell| *cell.borrow_mut() = Some(dialog.downgrade()));
     dialog.present(Some(&widgets.window));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dialog_may_open_only_when_settings_are_ready() {
+        assert!(!dialog_may_open(&SettingsRuntime::Uninitialized));
+        assert!(!dialog_may_open(&SettingsRuntime::Loading));
+        assert!(dialog_may_open(&SettingsRuntime::Ready(
+            SettingsWriter::new(AppSettings::default())
+        )));
+    }
 }
