@@ -8,13 +8,12 @@ mod settings;
 mod welcome;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use adw::prelude::*;
 use cloudstack_core::error::AppError;
-use cloudstack_core::model::{PostDocument, PostSummary, ProjectContext, RepositorySnapshot};
+use cloudstack_core::model::{PostDocument, PostSummary, ProjectContext};
 use cloudstack_core::services::assets::PendingAssetManager;
 use cloudstack_core::services::operations::RecoveredRename;
 use cloudstack_core::services::{assets, git, posts, project};
@@ -24,6 +23,7 @@ use sourceview::prelude::*;
 use crate::i18n::{self, UiMessage};
 use crate::search::SearchPanel;
 use crate::tasks;
+use cloudstack_application::session::WorkspaceSession;
 use cloudstack_application::workspace::{open_workspace, OpenWorkspaceOutcome};
 use cloudstack_application::{
     apply_successful_save, capabilities_for, classify_save_completion, SaveCompletionOutcome,
@@ -35,23 +35,10 @@ const MIN_PREVIEW_PANE_WIDTH: i32 = 360;
 
 #[derive(Default)]
 struct EditorState {
-    project: Option<ProjectContext>,
-    posts: Vec<PostSummary>,
-    document: Option<PostDocument>,
+    session: WorkspaceSession,
     loading_buffer: bool,
-    dirty: bool,
-    busy: bool,
-    document_epoch: u64,
-    /// 每次 mark_document_dirty 自增一次，用来在保存完成时判断保存期间
-    /// buffer 有没有被再次修改。
-    edit_generation: u64,
     draft_queue: drafts::DraftQueue,
     pending_assets: PendingAssetManager,
-    git_snapshot: Option<RepositorySnapshot>,
-    /// 每次触发 Git 状态刷新时自增，防止后台线程池乱序完成时旧请求覆盖新状态。
-    git_refresh_generation: u64,
-    /// 当前会话中已修改但尚未写回磁盘的文章快照。允许切换文章时保留编辑内容。
-    unsaved_documents: HashMap<String, PostDocument>,
 }
 
 #[derive(Clone)]
@@ -409,7 +396,7 @@ fn connect_editor(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     let widgets = widgets.clone();
     let state = Rc::clone(state);
     widgets.buffer.clone().connect_changed(move |_| {
-        if state.borrow().loading_buffer || state.borrow().document.is_none() {
+        if state.borrow().loading_buffer || state.borrow().session.document.is_none() {
             return;
         }
         mark_document_dirty(&widgets, &state);
@@ -434,7 +421,7 @@ fn connect_image_paste(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
             && key.to_unicode().is_some_and(|character| character == 'v');
         let paste_blocked = {
             let state = state.borrow();
-            state.document.is_none() || state.busy
+            state.session.document.is_none() || state.session.busy
         };
         if !is_paste || paste_blocked {
             return glib::Propagation::Proceed;
@@ -461,7 +448,8 @@ fn paste_clipboard_image(
 ) {
     let (context, post_id) = {
         let state = state.borrow();
-        let (Some(context), Some(document)) = (&state.project, &state.document) else {
+        let (Some(context), Some(document)) = (&state.session.project, &state.session.document)
+        else {
             return;
         };
         (context.clone(), document.id.clone())
@@ -492,6 +480,7 @@ fn paste_clipboard_image(
 
         let is_same_document = state
             .borrow()
+            .session
             .document
             .as_ref()
             .is_some_and(|document| document.id == post_id);
@@ -556,7 +545,7 @@ fn connect_actions(
     let publish_widgets = widgets.clone();
     let publish_state = Rc::clone(state);
     publish_action.connect_activate(move |_, _| {
-        if publish_state.borrow().busy {
+        if publish_state.borrow().session.busy {
             return;
         }
         let unsaved_count = unsaved_document_count(&publish_state);
@@ -569,14 +558,14 @@ fn connect_actions(
             );
             return;
         }
-        if unsaved_count == 1 && !publish_state.borrow().dirty {
+        if unsaved_count == 1 && !publish_state.borrow().session.dirty {
             toast(
                 &publish_widgets,
                 &i18n::text(UiMessage::GitSaveBeforeAction { count: 1 }),
             );
             return;
         }
-        if publish_state.borrow().dirty {
+        if publish_state.borrow().session.dirty {
             let callback_widgets = publish_widgets.clone();
             let callback_state = Rc::clone(&publish_state);
             save_document_then(
@@ -690,7 +679,12 @@ fn connect_post_list(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
             let Ok(index) = usize::try_from(index) else {
                 return;
             };
-            let post_id = state.borrow().posts.get(index).map(|post| post.id.clone());
+            let post_id = state
+                .borrow()
+                .session
+                .posts
+                .get(index)
+                .map(|post| post.id.clone());
             if let Some(post_id) = post_id {
                 load_document(&widgets, &state, &post_id);
             }
@@ -701,10 +695,10 @@ fn connect_post_list(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
 /// 忙碌或有未保存文章时都不能切走。
 fn ensure_no_unsaved_documents(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) -> bool {
     let state_snapshot = state.borrow();
-    if state_snapshot.busy {
+    if state_snapshot.session.busy {
         return false;
     }
-    if !state_snapshot.unsaved_documents.is_empty() {
+    if !state_snapshot.session.unsaved_documents.is_empty() {
         drop(state_snapshot);
         toast(widgets, &i18n::text(UiMessage::UnsavedProjectSwitch));
         return false;
@@ -718,6 +712,7 @@ fn ensure_no_unsaved_documents(widgets: &Widgets, state: &Rc<RefCell<EditorState
 fn retry_pending_asset_cleanup(state: &Rc<RefCell<EditorState>>) {
     let Some(root) = state
         .borrow()
+        .session
         .project
         .as_ref()
         .map(|context| context.root.clone())
@@ -767,19 +762,19 @@ fn close_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     if !ensure_no_unsaved_documents(widgets, state) {
         return;
     }
-    if state.borrow().project.is_none() {
+    if state.borrow().session.project.is_none() {
         return;
     }
     retry_pending_asset_cleanup(state);
 
     let mut editor_state = state.borrow_mut();
-    editor_state.project = None;
-    editor_state.posts.clear();
-    editor_state.document = None;
-    editor_state.dirty = false;
-    editor_state.git_snapshot = None;
-    editor_state.document_epoch = editor_state.document_epoch.wrapping_add(1);
-    let epoch = editor_state.document_epoch;
+    editor_state.session.project = None;
+    editor_state.session.posts.clear();
+    editor_state.session.document = None;
+    editor_state.session.dirty = false;
+    editor_state.session.git_snapshot = None;
+    editor_state.session.document_epoch = editor_state.session.document_epoch.wrapping_add(1);
+    let epoch = editor_state.session.document_epoch;
     drop(editor_state);
 
     populate_post_list(widgets, state, &[]);
@@ -801,7 +796,7 @@ fn close_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
 }
 
 fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path) {
-    if state.borrow().busy {
+    if state.borrow().session.busy {
         return;
     }
     let scanning_status = i18n::text(UiMessage::ProjectScanningStatus);
@@ -852,8 +847,14 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
             #[cfg(feature = "e2e")]
             if std::env::var_os("CLOUDSTACK_E2E_OPEN_FIRST").is_some() {
                 let requested = std::env::var("CLOUDSTACK_E2E_POST_ID").ok();
-                let post_id =
-                    requested.or_else(|| state.borrow().posts.first().map(|post| post.id.clone()));
+                let post_id = requested.or_else(|| {
+                    state
+                        .borrow()
+                        .session
+                        .posts
+                        .first()
+                        .map(|post| post.id.clone())
+                });
                 if let Some(post_id) = post_id {
                     load_document(&widgets, &state, &post_id);
                 }
@@ -882,16 +883,16 @@ fn apply_opened_workspace(
         }));
     let mut editor_state = state.borrow_mut();
     editor_state.loading_buffer = true;
-    editor_state.project = Some(context);
-    editor_state.git_snapshot = None;
-    editor_state.posts = post_summaries;
-    editor_state.document = None;
-    editor_state.dirty = false;
-    editor_state.unsaved_documents.clear();
-    editor_state.document_epoch = editor_state.document_epoch.wrapping_add(1);
-    let epoch = editor_state.document_epoch;
+    editor_state.session.project = Some(context);
+    editor_state.session.git_snapshot = None;
+    editor_state.session.posts = post_summaries;
+    editor_state.session.document = None;
+    editor_state.session.dirty = false;
+    editor_state.session.unsaved_documents.clear();
+    editor_state.session.document_epoch = editor_state.session.document_epoch.wrapping_add(1);
+    let epoch = editor_state.session.document_epoch;
     drop(editor_state);
-    let post_summaries = state.borrow().posts.clone();
+    let post_summaries = state.borrow().session.posts.clone();
     populate_post_list(widgets, state, &post_summaries);
     let empty_post_list = i18n::text(UiMessage::InitialPostListText);
     widgets.buffer.set_text(&format!("{empty_post_list}\n"));
@@ -1084,7 +1085,7 @@ fn initialize_and_open_project(
     content_dir: String,
     with_blog_frontmatter: bool,
 ) {
-    if state.borrow().busy {
+    if state.borrow().session.busy {
         return;
     }
     let busy_message = i18n::text(UiMessage::CreatingProjectConfigStatus);
@@ -1121,7 +1122,11 @@ fn populate_post_list(
         widgets.post_list.remove(&child);
     }
     for post in post_summaries {
-        let unsaved = state.borrow().unsaved_documents.contains_key(&post.id);
+        let unsaved = state
+            .borrow()
+            .session
+            .unsaved_documents
+            .contains_key(&post.id);
         let label = gtk::Label::builder()
             .label(post_list_label(&post.relative_path, unsaved).as_str())
             .xalign(0.0)
@@ -1156,6 +1161,7 @@ fn update_post_marker(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, post_
     let (index, relative_path, unsaved) = {
         let state = state.borrow();
         let Some((index, post)) = state
+            .session
             .posts
             .iter()
             .enumerate()
@@ -1166,7 +1172,7 @@ fn update_post_marker(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, post_
         (
             index,
             post.relative_path.clone(),
-            state.unsaved_documents.contains_key(post_id),
+            state.session.unsaved_documents.contains_key(post_id),
         )
     };
     let Ok(index) = i32::try_from(index) else {
@@ -1188,15 +1194,16 @@ fn update_post_marker(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, post_
 fn load_document(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, post_id: &str) {
     let (context, unsaved_document, already_open) = {
         let state = state.borrow();
-        let context = state.project.clone();
-        let unsaved_document = state.unsaved_documents.get(post_id).cloned();
+        let context = state.session.project.clone();
+        let unsaved_document = state.session.unsaved_documents.get(post_id).cloned();
         let already_open = state
+            .session
             .document
             .as_ref()
             .is_some_and(|document| document.id == post_id);
         (context, unsaved_document, already_open)
     };
-    if already_open || state.borrow().busy {
+    if already_open || state.borrow().session.busy {
         return;
     }
     let Some(context) = context else {
@@ -1245,9 +1252,9 @@ fn display_document(
     {
         let mut state = state.borrow_mut();
         state.loading_buffer = true;
-        state.document = Some(document.clone());
-        state.dirty = dirty;
-        state.document_epoch = state.document_epoch.wrapping_add(1);
+        state.session.document = Some(document.clone());
+        state.session.dirty = dirty;
+        state.session.document_epoch = state.session.document_epoch.wrapping_add(1);
     }
     widgets.buffer.set_text(&document.body);
     widgets.editor.grab_focus();
@@ -1259,8 +1266,8 @@ fn display_document(
     widgets.status_label.set_label(&status);
     let mut editor_state = state.borrow_mut();
     editor_state.loading_buffer = false;
-    let epoch = editor_state.document_epoch;
-    let context = editor_state.project.clone();
+    let epoch = editor_state.session.document_epoch;
+    let context = editor_state.session.project.clone();
     drop(editor_state);
     let project_name = context
         .as_ref()
@@ -1314,12 +1321,13 @@ fn save_document_then(
     // 交互式保存的“单飞”约束：手动保存通过本路径发起并先置 busy=true，
     // GTK 主线程串行分发事件下，第二次保存不会在第一次完成前插入执行。
     // 后续若放开并发或多任务保存，需引入保存任务身份与乱序 completion 防护。
-    if state.borrow().busy {
+    if state.borrow().session.busy {
         return;
     }
     let (context, document) = {
         let state = state.borrow();
-        let (Some(context), Some(document)) = (&state.project, &state.document) else {
+        let (Some(context), Some(document)) = (&state.session.project, &state.session.document)
+        else {
             return;
         };
         (context.clone(), document.clone())
@@ -1331,7 +1339,7 @@ fn save_document_then(
     let body = text.to_string();
     let (saved_document_epoch, saved_generation) = {
         let state = state.borrow();
-        (state.document_epoch, state.edit_generation)
+        (state.session.document_epoch, state.session.edit_generation)
     };
     let task_frontmatter = raw_frontmatter.clone();
     let task_body = body.clone();
@@ -1362,22 +1370,23 @@ fn save_document_then(
                         let mut editor_state_ref = state.borrow_mut();
                         let editor_state: &mut EditorState = &mut editor_state_ref;
                         let current_id = editor_state
+                            .session
                             .document
                             .as_ref()
                             .map(|current| current.id.as_str());
                         let outcome = classify_save_completion(
                             current_id,
                             &document.id,
-                            editor_state.document_epoch,
+                            editor_state.session.document_epoch,
                             saved_document_epoch,
-                            editor_state.edit_generation,
+                            editor_state.session.edit_generation,
                             saved_generation,
                         );
                         apply_successful_save(
                             outcome,
-                            &mut editor_state.document,
-                            &mut editor_state.unsaved_documents,
-                            &mut editor_state.dirty,
+                            &mut editor_state.session.document,
+                            &mut editor_state.session.unsaved_documents,
+                            &mut editor_state.session.dirty,
                             &document.id,
                             &revision,
                             raw_frontmatter.clone(),
@@ -1432,20 +1441,23 @@ fn mark_document_dirty(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
             )
             .to_string();
         let mut state = state.borrow_mut();
-        let Some(document) = state.document.clone() else {
+        let Some(document) = state.session.document.clone() else {
             return;
         };
-        state.dirty = true;
-        state.edit_generation = state.edit_generation.wrapping_add(1);
+        state.session.dirty = true;
+        state.session.edit_generation = state.session.edit_generation.wrapping_add(1);
         let mut snapshot = document;
         snapshot.body = body;
         let post_id = snapshot.id.clone();
-        state.unsaved_documents.insert(post_id.clone(), snapshot);
+        state
+            .session
+            .unsaved_documents
+            .insert(post_id.clone(), snapshot);
         post_id
     };
     update_post_marker(widgets, state, &post_id);
     sync_controls(widgets, state);
-    if let Some(document) = &state.borrow().document {
+    if let Some(document) = &state.borrow().session.document {
         widgets
             .status_label
             .set_label(&i18n::text(UiMessage::DocumentUnsavedStatus {
@@ -1456,13 +1468,13 @@ fn mark_document_dirty(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
 }
 
 fn set_busy(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, busy: bool, message: &str) {
-    state.borrow_mut().busy = busy;
+    state.borrow_mut().session.busy = busy;
     if busy && !message.is_empty() {
         widgets.status_label.set_label(message);
     } else if !busy {
         let editor_state = state.borrow();
-        if let Some(document) = &editor_state.document {
-            let status = if editor_state.dirty {
+        if let Some(document) = &editor_state.session.document {
+            let status = if editor_state.session.dirty {
                 i18n::text(UiMessage::DocumentUnsavedStatus {
                     path: document.relative_path.clone(),
                 })
@@ -1472,11 +1484,11 @@ fn set_busy(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, busy: bool, mes
                 })
             };
             widgets.status_label.set_label(&status);
-        } else if editor_state.project.is_some() {
+        } else if editor_state.session.project.is_some() {
             widgets
                 .status_label
                 .set_label(&i18n::text(UiMessage::ProjectOpenedStatus {
-                    count: editor_state.posts.len(),
+                    count: editor_state.session.posts.len(),
                 }));
         } else {
             widgets
@@ -1525,30 +1537,30 @@ fn sync_controls(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     let capabilities = {
         let state = state.borrow();
         capabilities_for(WorkspaceCapabilitiesInput {
-            has_project: state.project.is_some(),
-            has_document: state.document.is_some(),
-            unsaved_document_count: state.unsaved_documents.len(),
-            busy: state.busy,
-            dirty: state.dirty,
-            git_snapshot: state.git_snapshot.as_ref(),
+            has_project: state.session.project.is_some(),
+            has_document: state.session.document.is_some(),
+            unsaved_document_count: state.session.unsaved_documents.len(),
+            busy: state.session.busy,
+            dirty: state.session.dirty,
+            git_snapshot: state.session.git_snapshot.as_ref(),
         })
     };
     render_controls(widgets, &capabilities);
 }
 
 fn has_unsaved_documents(state: &Rc<RefCell<EditorState>>) -> bool {
-    !state.borrow().unsaved_documents.is_empty()
+    !state.borrow().session.unsaved_documents.is_empty()
 }
 
 fn unsaved_document_count(state: &Rc<RefCell<EditorState>>) -> usize {
-    state.borrow().unsaved_documents.len()
+    state.borrow().session.unsaved_documents.len()
 }
 
 fn connect_close_guard(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     let widgets = widgets.clone();
     let state = Rc::clone(state);
     widgets.window.clone().connect_close_request(move |_| {
-        if state.borrow().busy {
+        if state.borrow().session.busy {
             toast(&widgets, &i18n::text(UiMessage::CloseWhileBusy));
             return glib::Propagation::Stop;
         }
@@ -1562,6 +1574,7 @@ fn connect_close_guard(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
         let unsaved_documents = {
             let state = state.borrow();
             let mut documents = state
+                .session
                 .unsaved_documents
                 .values()
                 .map(|document| document.relative_path.clone())

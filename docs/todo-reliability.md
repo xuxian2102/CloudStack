@@ -218,6 +218,75 @@ fn on_save_clicked(...) {
 
 第一轮应保持纯机械迁移，不同时重写状态模型；等编译边界建立并全绿，再逐块把 `EditorState` 的变更改成 application 方法。**最值得现在立即做的是第 1～3 项**——完成后 `cloudstack-gtk` 就不会再拥有保存完成判定、Git 主操作决策和控件权限规则这三类关键业务状态机，分层会从"代码习惯"升级成"编译器强制"。
 
+## 后续路线：WorkspaceSession → 无损文本合同 → Live Preview（用户提出，2026-08-07，application-layer 第一阶段收尾后）
+
+**状态：阶段 9（9A）已完成，9B/9C 及阶段 10～14 尚未开始。**
+
+顺序固定，不要跳步：
+
+```text
+阶段 9   EditorState → WorkspaceSession（9A/9B/9C 三个提交）
+阶段 10  无损文本文件合同：EOL + 末尾换行（core）
+阶段 11  Live Preview 三个技术 spike（不进 main，只留结论/ADR）
+阶段 12  Live Preview V1：语义样式，不隐藏 Markdown 标记
+阶段 13  Live Preview V2：行级 conceal
+阶段 14  Live Preview V3：OverlayManager、checkbox、block image
+```
+
+不要继续零散搬函数，也不要现在重写 GTK 或直接开始完整 WYSIWYG；不要把 WorkspaceSession 和 Live Preview 塞进同一个提交。
+
+### 阶段 9：EditorState → WorkspaceSession（拆成 9A/9B/9C）
+
+当前 `cloudstack-gtk` 的 `EditorState` 仍直接持有项目、文章、当前文档、dirty/busy、三个 generation、Git snapshot 和未保存文章表——这是第 1～8 项之后剩下的最大架构问题。
+
+**9A（已完成）：建立 Session 外壳，机械迁移字段。** 新增 `cloudstack-application/src/session.rs`，`WorkspaceSession` 持有原计划的十个字段（`project`/`posts`/`document`/`unsaved_documents`/`git_snapshot`/`dirty`/`busy`/`document_epoch`/`edit_generation`/`git_refresh_generation`），原有字段上的说明性注释（`edit_generation`/`git_refresh_generation`/`unsaved_documents`）原样保留。`lib.rs` 只加 `pub mod session;`，不重新导出到 crate 根，延续 `recent::`/`git::`/`publish::`/`drafts::`/`workspace::` 的模块命名风格。
+
+**一处规格之外的显式设计决定**：十个字段全部声明为 `pub`。这一轮明确不新增状态转换方法（那是 9B 的工作），但 GTK 仍需要直接读写这些字段（例如 `editor_state.dirty = false;`、`editor_state.document_epoch = editor_state.document_epoch.wrapping_add(1);`），如果字段私有 + 只读 getter，就必须同时发明一整套 setter 方法，等于提前做了 9B 的工作、也违反"本轮不新增状态转换逻辑"。9B 给字段加上真正的状态转换方法后，这些字段会收回私有。
+
+GTK 的 `EditorState` 改成只剩 `session: WorkspaceSession` + `loading_buffer`（GTK buffer 加载标志）+ `draft_queue`（草稿队列/定时器）+ `pending_assets`（待提交图片管理）。所有跨 `window.rs` 和 `window/{articles,drafts,frontmatter,git_panel,publish,recent}.rs`（`settings.rs`/`welcome.rs` 不触碰这些字段）对这十个字段的直接访问，都在保持 `<expr>.<field>` 语义完全不变的前提下改成了 `<expr>.session.<field>`——纯粹加一层，没有改变任何调用路径的读写时机或借用范围。没有引入 `WorkspaceState` enum / `DocumentSession` map / command bus / event reducer / effect trait / Redux-Elm 架构。
+
+**验收**：`EditorState` 现在只有 `session`/`loading_buffer`/`draft_queue`/`pending_assets` 四个字段，不再直接拥有原来的十个字段；`cargo tree -p cloudstack-application --edges normal` 确认仍然只依赖 `cloudstack-core`。这一轮是纯结构迁移，没有新增或删除任何测试——workspace 总数维持 280（application 80、core 155、gtk 36、renderer 9）不变，与预期完全吻合。
+
+**9B（未开始）：把状态转换收进 Session。** 字段迁完并全绿后，给 `WorkspaceSession` 加方法：`install_workspace`/`close_workspace`/`install_document`/`mark_document_dirty`/`apply_saved_document`/`remove_document`/`replace_posts`，返回值只包含 GTK 展示所需信息（如 `WorkspaceInstalled { document_epoch }`、`DocumentDirtyOutcome { edit_generation, became_dirty }`），application 不调用任何 GTK。必须用测试固定的语义：
+1. 打开新 workspace 会清空旧文档、Git snapshot 和 unsaved map；
+2. 打开/关闭 workspace 都推进 `document_epoch`；
+3. 切换文章时保留其他文章的未保存快照；
+4. 编辑后 `edit_generation` 推进；
+5. 保存期间又发生编辑，旧保存 completion 不能清掉 dirty；
+6. 删除或重命名文章时，unsaved map 不残留旧 ID；
+7. 安装文档不能错误地继承上一篇文章的 dirty 状态。
+
+**9C（未开始）：统一能力计算和异步 generation。** `WorkspaceSession` 提供 `capabilities()`（取代 GTK 手工拼 `WorkspaceCapabilitiesInput`）、`begin_git_refresh()`/`apply_git_snapshot(request, snapshot)`（不是重写 `should_apply_git_refresh()`，而是让 session 统一负责生成 request、保存 generation、校验 completion、安装 snapshot）。完成后 GTK 不再自己维护应用状态不变量。
+
+### 阶段 10：无损文本文件合同
+
+做 Live Preview 前必须先定义源码到底是什么。新增 `TextFileFormat { line_ending: LineEnding, has_final_newline: bool }`（`LineEnding::{Lf, CrLf, Mixed}`）。加载时检测 EOL 和末尾换行、buffer 内统一用 `\n`；保存时恢复 LF/CRLF、按 `has_final_newline` 处理结尾、revision-safe write。Mixed EOL 不维护逐行映射——可以打开、显示格式警告、保存时规范化为项目默认或多数 EOL，不声称 mixed-EOL 完全无损。这一阶段放在 core，因为 CLI 或未来 Qt UI 同样需要。
+
+### 阶段 11：Live Preview 技术验证（三个互不依赖的 spike，不进 main）
+
+1. **tree-sitter Point → TextIter**：验证 ASCII/中文/Emoji/组合字符/多行/空行/末尾无换行；目标 API `fn iter_at_point(buffer: &gtk::TextBuffer, point: tree_sitter::Point) -> Option<gtk::TextIter>`；明确处理 row 越界、byte column 越界、byte column 不在 UTF-8 字符边界、tree-sitter 与 buffer source 不同 generation 这四种情况。
+2. **TextTag priority**：验证 GtkSourceView 内置 Markdown highlighting 与自定义 tag（heading scale/strong weight/inline-code background/link foreground/selection/search match/diagnostic）的覆盖顺序。V1 默认保留 GtkSourceView Markdown language，不立刻自定义 `.lang`。
+3. **checkbox marker**：验证三个方案——A. alpha=0 透明文字是否仍占位；B. invisible marker + 缩进区图标；C. marker 可见但样式化/可点击。不要未经验证直接决定 overlay 方案。
+
+Spike 在临时分支完成，最终只把测试结论、截图、ADR 决策合入 main，不保留实验垃圾代码。
+
+### 阶段 12：Live Preview V1（语义样式，不隐藏标记）
+
+支持 heading/strong/emphasis/strikethrough/inline code/fenced code/quote/link，**所有 Markdown 标记仍然可见**。建议结构：
+```text
+crates/cloudstack-gtk/src/live_preview/
+  mod.rs
+  analysis.rs   // tree-sitter 全量解析，生成 byte + Point ranges，不调用 GTK
+  tags.rs       // 创建 CloudStack 私有 TextTag，设置显式 priority
+  adapter.rs    // Point → TextIter，只应用/删除 CloudStack 自己的 tags，generation 校验
+  fixtures.rs
+```
+第一版：debounce 后全量 tree-sitter parse；不维护 `InputEdit`；不做 conceal；不做 overlay；不做稳定 block ID；不做自定义 undo；不在 canonical buffer 插 anchor。正式预览继续由现有 renderer 负责，tree-sitter 只负责编辑器装饰。
+
+### 现在明确不要做
+
+不换 UI 框架；不做 AppFlowy/Notion block tree；不把 tree-sitter 当语义权威；不实现协作编辑；不实现稳定 block ID；不把 `TextChildAnchor` 插进 canonical buffer；不把 WorkspaceSession 和 Live Preview 塞进同一个提交；不顺手做外部文件 monitor；不在 V1 做图片、数学和表格 widget。
+
 ## 建议实施顺序（原审阅给出，供参考）
 
 1. `fix(git): byte-safe porcelain v2 parser`

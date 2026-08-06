@@ -23,7 +23,8 @@ pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
 
     let (fields, post_id, raw_frontmatter) = {
         let state = state.borrow();
-        let (Some(project), Some(document)) = (&state.project, &state.document) else {
+        let (Some(project), Some(document)) = (&state.session.project, &state.session.document)
+        else {
             append_hint(widgets, &i18n::text(UiMessage::FrontmatterOpenHint));
             return;
         };
@@ -45,7 +46,7 @@ pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
         let callback_state = Rc::clone(state);
         add_button.connect_clicked(move |_| {
             let raw = frontmatter_service::initial_for_post(&fields, &post_id).unwrap_or_default();
-            if let Some(document) = callback_state.borrow_mut().document.as_mut() {
+            if let Some(document) = callback_state.borrow_mut().session.document.as_mut() {
                 document.raw_frontmatter = Some(raw);
             }
             mark_document_dirty(&callback_widgets, &callback_state);
@@ -469,6 +470,7 @@ fn update_field(
 ) {
     let raw_frontmatter = state
         .borrow()
+        .session
         .document
         .as_ref()
         .and_then(|document| document.raw_frontmatter.clone());
@@ -477,7 +479,7 @@ fn update_field(
     };
     match frontmatter_service::set_field(&raw_frontmatter, name, value) {
         Ok(raw) => {
-            if let Some(document) = state.borrow_mut().document.as_mut() {
+            if let Some(document) = state.borrow_mut().session.document.as_mut() {
                 document.raw_frontmatter = Some(raw);
             }
             mark_document_dirty(widgets, state);
@@ -509,7 +511,7 @@ fn append_remove_button(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
         let response_widgets = callback_widgets.clone();
         let response_state = Rc::clone(&callback_state);
         dialog.connect_response(Some("remove"), move |_, _| {
-            if let Some(document) = response_state.borrow_mut().document.as_mut() {
+            if let Some(document) = response_state.borrow_mut().session.document.as_mut() {
                 document.raw_frontmatter = None;
             }
             mark_document_dirty(&response_widgets, &response_state);

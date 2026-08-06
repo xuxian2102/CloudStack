@@ -88,12 +88,13 @@ pub(super) fn save_and_close(widgets: &Widgets, state: &Rc<RefCell<EditorState>>
     cancel_timer(state);
     let (context, mut documents) = {
         let state = state.borrow();
-        let Some(context) = &state.project else {
+        let Some(context) = &state.session.project else {
             return widgets.window.close();
         };
         (
             context.clone(),
             state
+                .session
                 .unsaved_documents
                 .values()
                 .cloned()
@@ -126,12 +127,13 @@ pub(super) fn save_all(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     cancel_timer(state);
     let (context, mut documents) = {
         let state = state.borrow();
-        let Some(context) = &state.project else {
+        let Some(context) = &state.session.project else {
             return;
         };
         (
             context.clone(),
             state
+                .session
                 .unsaved_documents
                 .values()
                 .cloned()
@@ -160,12 +162,13 @@ pub(super) fn discard_and_close(widgets: &Widgets, state: &Rc<RefCell<EditorStat
     cancel_timer(state);
     let (context, mut documents) = {
         let state = state.borrow();
-        let Some(context) = &state.project else {
+        let Some(context) = &state.session.project else {
             return widgets.window.close();
         };
         (
             context.clone(),
             state
+                .session
                 .unsaved_documents
                 .values()
                 .cloned()
@@ -204,10 +207,11 @@ fn cancel_timer(state: &Rc<RefCell<EditorState>>) {
 fn enqueue_current_snapshot(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     let (context, document, raw_frontmatter) = {
         let state = state.borrow();
-        if !state.dirty {
+        if !state.session.dirty {
             return;
         }
-        let (Some(context), Some(document)) = (&state.project, &state.document) else {
+        let (Some(context), Some(document)) = (&state.session.project, &state.session.document)
+        else {
             return;
         };
         (
@@ -403,6 +407,7 @@ fn complete_batch_save(
         .collect::<Vec<_>>();
     let project_root = state
         .borrow()
+        .session
         .project
         .as_ref()
         .map(|context| context.root.clone());
@@ -418,22 +423,24 @@ fn complete_batch_save(
                     log::warn!("保存后清理待提交图片失败：{error}");
                 }
             }
-            editor_state.unsaved_documents.remove(&document.id);
+            editor_state.session.unsaved_documents.remove(&document.id);
             if editor_state
+                .session
                 .document
                 .as_ref()
                 .is_some_and(|current| current.id == document.id)
             {
-                editor_state.document = Some(document.clone());
+                editor_state.session.document = Some(document.clone());
             }
         }
         let current_id = editor_state
+            .session
             .document
             .as_ref()
             .map(|document| document.id.clone());
-        editor_state.dirty = current_id
+        editor_state.session.dirty = current_id
             .as_deref()
-            .is_some_and(|post_id| editor_state.unsaved_documents.contains_key(post_id));
+            .is_some_and(|post_id| editor_state.session.unsaved_documents.contains_key(post_id));
     }
     for post_id in &saved_ids {
         super::update_post_marker(widgets, state, post_id);
@@ -491,15 +498,16 @@ fn complete_discard(
     {
         let mut editor_state = state.borrow_mut();
         for post_id in &discarded_ids {
-            editor_state.unsaved_documents.remove(post_id);
+            editor_state.session.unsaved_documents.remove(post_id);
         }
         let current_id = editor_state
+            .session
             .document
             .as_ref()
             .map(|document| document.id.clone());
-        editor_state.dirty = current_id
+        editor_state.session.dirty = current_id
             .as_deref()
-            .is_some_and(|post_id| editor_state.unsaved_documents.contains_key(post_id));
+            .is_some_and(|post_id| editor_state.session.unsaved_documents.contains_key(post_id));
     }
     for post_id in &discarded_ids {
         super::update_post_marker(widgets, state, post_id);
@@ -530,9 +538,17 @@ fn is_current_post(
     let state = state.borrow();
     drafts::is_current_draft_target(CurrentDraftTargetInput {
         expected_project_root: context_root,
-        current_project_root: state.project.as_ref().map(|context| context.root.as_path()),
+        current_project_root: state
+            .session
+            .project
+            .as_ref()
+            .map(|context| context.root.as_path()),
         expected_post_id: post_id,
-        current_post_id: state.document.as_ref().map(|document| document.id.as_str()),
+        current_post_id: state
+            .session
+            .document
+            .as_ref()
+            .map(|document| document.id.as_str()),
     })
 }
 
@@ -544,14 +560,22 @@ fn can_offer_recovery(
 ) -> bool {
     let state = state.borrow();
     drafts::can_offer_recovery(DraftRecoveryEligibilityInput {
-        busy: state.busy,
-        dirty: state.dirty,
+        busy: state.session.busy,
+        dirty: state.session.dirty,
         expected_project_root: project_root,
-        current_project_root: state.project.as_ref().map(|context| context.root.as_path()),
+        current_project_root: state
+            .session
+            .project
+            .as_ref()
+            .map(|context| context.root.as_path()),
         expected_post_id: post_id,
-        current_post_id: state.document.as_ref().map(|document| document.id.as_str()),
+        current_post_id: state
+            .session
+            .document
+            .as_ref()
+            .map(|document| document.id.as_str()),
         expected_epoch: epoch,
-        current_epoch: state.document_epoch,
+        current_epoch: state.session.document_epoch,
     })
 }
 
@@ -597,7 +621,7 @@ fn show_recovery_dialog(
         {
             let mut state = restore_state.borrow_mut();
             state.loading_buffer = true;
-            if let Some(document) = state.document.as_mut() {
+            if let Some(document) = state.session.document.as_mut() {
                 document.raw_frontmatter.clone_from(&draft.raw_frontmatter);
             }
         }
@@ -605,7 +629,7 @@ fn show_recovery_dialog(
         {
             let mut state = restore_state.borrow_mut();
             state.loading_buffer = false;
-            state.dirty = true;
+            state.session.dirty = true;
         }
         super::mark_document_dirty(&restore_widgets, &restore_state);
         restore_widgets

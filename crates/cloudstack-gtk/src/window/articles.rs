@@ -15,10 +15,10 @@ pub(super) fn show_create_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorSta
     let has_unsaved = has_unsaved_documents(state);
     let context = {
         let state = state.borrow();
-        if state.busy || has_unsaved {
+        if state.session.busy || has_unsaved {
             return;
         }
-        let Some(context) = &state.project else {
+        let Some(context) = &state.session.project else {
             return;
         };
         context.clone()
@@ -91,7 +91,7 @@ fn create_post(
             match result {
                 Ok((document, summaries)) => {
                     populate_post_list(&widgets, &state, &summaries);
-                    state.borrow_mut().posts = summaries;
+                    state.borrow_mut().session.posts = summaries;
                     display_document(&widgets, &state, document, false);
                     toast(&widgets, &i18n::text(UiMessage::ArticleCreated));
                 }
@@ -107,10 +107,11 @@ pub(super) fn show_rename_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorSta
     let has_unsaved = has_unsaved_documents(state);
     let (context, document) = {
         let state = state.borrow();
-        if state.busy || has_unsaved {
+        if state.session.busy || has_unsaved {
             return;
         }
-        let (Some(context), Some(document)) = (&state.project, &state.document) else {
+        let (Some(context), Some(document)) = (&state.session.project, &state.session.document)
+        else {
             return;
         };
         (context.clone(), document.clone())
@@ -189,7 +190,7 @@ fn rename_post(
                 Ok((renamed, summaries)) => {
                     populate_post_list(&widgets, &state, &summaries);
                     let mut editor_state = state.borrow_mut();
-                    editor_state.posts = summaries;
+                    editor_state.session.posts = summaries;
                     editor_state
                         .pending_assets
                         .forget_post(&context.root, &old_id);
@@ -210,10 +211,11 @@ pub(super) fn show_delete_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorSta
     let has_unsaved = has_unsaved_documents(state);
     let (context, document) = {
         let state = state.borrow();
-        if state.busy || has_unsaved {
+        if state.session.busy || has_unsaved {
             return;
         }
-        let (Some(context), Some(document)) = (&state.project, &state.document) else {
+        let (Some(context), Some(document)) = (&state.session.project, &state.session.document)
+        else {
             return;
         };
         (context.clone(), document.clone())
@@ -264,11 +266,12 @@ fn delete_post(
                 Ok(summaries) => {
                     populate_post_list(&widgets, &state, &summaries);
                     let mut editor_state = state.borrow_mut();
-                    editor_state.posts = summaries;
-                    editor_state.document = None;
-                    editor_state.dirty = false;
-                    editor_state.document_epoch = editor_state.document_epoch.wrapping_add(1);
-                    let epoch = editor_state.document_epoch;
+                    editor_state.session.posts = summaries;
+                    editor_state.session.document = None;
+                    editor_state.session.dirty = false;
+                    editor_state.session.document_epoch =
+                        editor_state.session.document_epoch.wrapping_add(1);
+                    let epoch = editor_state.session.document_epoch;
                     editor_state
                         .pending_assets
                         .forget_post(&context.root, &post_id);

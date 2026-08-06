@@ -53,8 +53,8 @@ pub(super) fn maybe_reopen_last_project(widgets: &Widgets, state: &Rc<RefCell<Ed
                 choose_project_to_reopen(ProjectReopenInput {
                     enabled: settings.auto_reopen_last_project,
                     // e2e 强制打开的项目、或者用户手速极快已经点开了别的项目，都不要抢。
-                    has_open_project: state.project.is_some(),
-                    busy: state.busy,
+                    has_open_project: state.session.project.is_some(),
+                    busy: state.session.busy,
                     projects: &projects,
                 })
             };
@@ -102,7 +102,7 @@ pub(super) fn maybe_reopen_last_document(
     state: &Rc<RefCell<EditorState>>,
     project_root: PathBuf,
 ) {
-    let expected_epoch = state.borrow().document_epoch;
+    let expected_epoch = state.borrow().session.document_epoch;
     let widgets = widgets.clone();
     let state = Rc::clone(state);
     let lookup_root = project_root.clone();
@@ -129,13 +129,14 @@ pub(super) fn maybe_reopen_last_document(
                     enabled: settings.restore_last_document_on_open,
                     expected_project_root: &project_root,
                     current_project_root: state
+                        .session
                         .project
                         .as_ref()
                         .map(|context| context.root.as_path()),
                     expected_document_epoch: expected_epoch,
-                    current_document_epoch: state.document_epoch,
-                    document_already_selected: state.document.is_some(),
-                    posts: &state.posts,
+                    current_document_epoch: state.session.document_epoch,
+                    document_already_selected: state.session.document.is_some(),
+                    posts: &state.session.posts,
                     last_document_id: last_document_id.as_deref(),
                 })
             };

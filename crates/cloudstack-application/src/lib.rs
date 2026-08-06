@@ -12,6 +12,7 @@ pub mod preview;
 pub mod publish;
 pub mod recent;
 pub mod save;
+pub mod session;
 pub mod settings;
 pub mod workspace;
 

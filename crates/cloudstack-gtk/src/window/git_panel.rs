@@ -741,12 +741,12 @@ pub(super) fn activate_primary(widgets: &Widgets, state: &Rc<RefCell<EditorState
     let action = {
         let state = state.borrow();
         effective_action(
-            state.git_snapshot.as_ref(),
-            state.busy,
-            state.unsaved_documents.len(),
+            state.session.git_snapshot.as_ref(),
+            state.session.busy,
+            state.session.unsaved_documents.len(),
         )
     };
-    let snapshot = state.borrow().git_snapshot.clone();
+    let snapshot = state.borrow().session.git_snapshot.clone();
     match action {
         EffectiveGitAction::None => {
             if snapshot.is_none() {
@@ -896,7 +896,7 @@ fn show_identity_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
 }
 
 pub(super) fn fetch_remote(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
-    if state.borrow().busy {
+    if state.borrow().session.busy {
         return;
     }
     let heading = i18n::text(UiMessage::GitFetchOperation);
@@ -965,10 +965,10 @@ fn execute_operation<Work>(
     let has_unsaved = has_unsaved_documents(state);
     let context = {
         let state = state.borrow();
-        if state.busy || (completion == Completion::ReloadProject && has_unsaved) {
+        if state.session.busy || (completion == Completion::ReloadProject && has_unsaved) {
             return;
         }
-        let Some(context) = &state.project else {
+        let Some(context) = &state.session.project else {
             return;
         };
         context.clone()
@@ -1106,7 +1106,7 @@ fn show_remote_dialog(
     state: &Rc<RefCell<EditorState>>,
     snapshot: &RepositorySnapshot,
 ) {
-    let Some(context) = state.borrow().project.clone() else {
+    let Some(context) = state.borrow().session.project.clone() else {
         return;
     };
     let url_entry = gtk::Entry::builder()
@@ -1284,8 +1284,8 @@ pub(super) fn operation_log(report: &OperationReport) -> String {
 }
 
 pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
-    let Some(context) = state.borrow().project.clone() else {
-        state.borrow_mut().git_snapshot = None;
+    let Some(context) = state.borrow().session.project.clone() else {
+        state.borrow_mut().session.git_snapshot = None;
         widgets.git_panel.set_project_available(false);
         return;
     };
@@ -1293,8 +1293,9 @@ pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     let expected_root = context.root.clone();
     let expected_generation = {
         let mut editor_state = state.borrow_mut();
-        editor_state.git_refresh_generation = editor_state.git_refresh_generation.wrapping_add(1);
-        editor_state.git_refresh_generation
+        editor_state.session.git_refresh_generation =
+            editor_state.session.git_refresh_generation.wrapping_add(1);
+        editor_state.session.git_refresh_generation
     };
     let widgets = widgets.clone();
     let state = Rc::clone(state);
@@ -1305,11 +1306,12 @@ pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
                 let editor_state = state.borrow();
                 should_apply_git_refresh(
                     editor_state
+                        .session
                         .project
                         .as_ref()
                         .map(|current| current.root.as_path()),
                     &expected_root,
-                    editor_state.git_refresh_generation,
+                    editor_state.session.git_refresh_generation,
                     expected_generation,
                 )
             };
@@ -1319,7 +1321,7 @@ pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
             match result {
                 Ok(snapshot) => {
                     widgets.git_panel.apply(&snapshot);
-                    state.borrow_mut().git_snapshot = Some(snapshot);
+                    state.borrow_mut().session.git_snapshot = Some(snapshot);
                     super::sync_controls(&widgets, &state);
                 }
                 Err(error) => {

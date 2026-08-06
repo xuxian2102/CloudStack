@@ -310,13 +310,13 @@ pub(super) fn show_dialog(widgets: &Widgets, state: &Rc<std::cell::RefCell<Edito
     let has_unsaved = has_unsaved_documents(state);
     let (context, posts) = {
         let state = state.borrow();
-        if state.busy || state.dirty || has_unsaved {
+        if state.session.busy || state.session.dirty || has_unsaved {
             return;
         }
-        let Some(context) = &state.project else {
+        let Some(context) = &state.session.project else {
             return;
         };
-        (context.clone(), state.posts.clone())
+        (context.clone(), state.session.posts.clone())
     };
     let status_message = i18n::text(UiMessage::GitReadingStatus);
     set_busy(widgets, state, true, &status_message);
@@ -406,11 +406,12 @@ fn present_dialog(
                     Ok((result, updated_context)) => {
                         let should_replace = task_state
                             .borrow()
+                            .session
                             .project
                             .as_ref()
                             .is_some_and(|project| project.root == updated_context.root);
                         if should_replace {
-                            task_state.borrow_mut().project = Some(updated_context);
+                            task_state.borrow_mut().session.project = Some(updated_context);
                         }
                         task_dialog
                             .result_label
