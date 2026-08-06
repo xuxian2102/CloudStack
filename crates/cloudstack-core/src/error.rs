@@ -95,7 +95,6 @@ impl ErrorPayload {
         &self.fallback
     }
 
-    #[cfg(test)]
     pub fn code(&self) -> &str {
         &self.code
     }

@@ -8,8 +8,8 @@ use cloudstack_core::model::{ChangeKind, GitStatus, PostSummary, ProjectContext,
 use cloudstack_core::services::{git, project};
 
 use super::{
-    git_panel, git_panel::operation_log, has_unsaved_documents, set_busy, show_error, toast,
-    EditorState, Widgets,
+    git_panel, git_panel::operation_log, has_unsaved_documents, set_busy, show_error,
+    show_user_facing_error, toast, EditorState, Widgets,
 };
 use crate::i18n::{self, UiMessage};
 use crate::tasks;
@@ -446,7 +446,7 @@ pub(super) fn show_dialog(widgets: &Widgets, state: &Rc<std::cell::RefCell<Edito
             set_busy(&widgets, &state, false, "");
             match result {
                 Ok(status) => present_dialog(&widgets, &state, context, posts, status),
-                Err(error) => show_error(&widgets, &error.to_string()),
+                Err(error) => show_user_facing_error(&widgets, &error),
             }
         },
     );
@@ -520,7 +520,7 @@ fn present_dialog(
                             .set_label(&publish_summary(&result, push));
                         task_dialog
                             .trace_buffer
-                            .set_text(&operation_log(&result.report));
+                            .set_text(&publish_operation_log(&result));
                         if result.error.is_none() {
                             toast(
                                 &task_widgets,
@@ -538,7 +538,7 @@ fn present_dialog(
                             "{}: {error}",
                             i18n::text(UiMessage::GitOperationIncomplete)
                         ));
-                        show_error(&task_widgets, &error.to_string());
+                        show_user_facing_error(&task_widgets, &error);
                     }
                 }
                 refresh_status(
@@ -569,10 +569,7 @@ fn refresh_status(
             dialog.set_working(false);
             match result {
                 Ok(status) => dialog.apply_status(&status),
-                Err(error) => show_error(
-                    &widgets,
-                    &format!("{}: {error}", i18n::text(UiMessage::GitStatusReadFailed)),
-                ),
+                Err(error) => show_user_facing_error(&widgets, &error),
             }
             git_panel::refresh(&widgets, &state);
         },
@@ -648,13 +645,27 @@ fn publish_summary(result: &PublishResult, requested_push: bool) -> String {
         }));
     }
     if let Some(error) = &result.error {
-        lines.push(error.fallback().to_string());
+        let mapped = i18n::git_payload_error(error);
+        lines.push(i18n::text(mapped.message));
     }
     if lines.is_empty() {
         i18n::text(UiMessage::GitNoChangesExecuted)
     } else {
         lines.join("\n")
     }
+}
+
+fn publish_operation_log(result: &PublishResult) -> String {
+    let mut log = operation_log(&result.report);
+    if let Some(error) = &result.error {
+        if !log.is_empty() {
+            log.push_str("\n\n");
+        }
+        // The translated summary stays concise; the structured fallback remains
+        // available in the expandable execution details for diagnosis.
+        log.push_str(error.fallback());
+    }
+    log
 }
 
 #[cfg(test)]
@@ -679,7 +690,7 @@ mod tests {
         assert!(summary.contains("1"));
         assert!(summary.contains("abc123"));
         assert!(summary.contains("push"));
-        assert!(summary.contains("推送失败"));
+        assert!(summary.contains(&i18n::text(UiMessage::GitErrorPushRejected)));
     }
 
     #[test]

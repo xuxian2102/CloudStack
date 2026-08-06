@@ -2,6 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
+use cloudstack_core::error::AppError;
 use cloudstack_core::model::{
     ChangeKind, FileChange, GitOperationResult, OperationReport, RepositorySnapshot,
     RepositoryTopology, RepositoryVisibility, SyncRelation, WorktreeState,
@@ -10,7 +11,8 @@ use cloudstack_core::services::git;
 use gtk::glib;
 
 use super::{
-    drafts, has_unsaved_documents, open_project, set_busy, show_error, toast, EditorState, Widgets,
+    drafts, has_unsaved_documents, open_project, set_busy, show_error, show_user_facing,
+    show_user_facing_error, toast, EditorState, Widgets,
 };
 use crate::i18n::{self, UiMessage};
 use crate::tasks;
@@ -1082,13 +1084,15 @@ fn execute_operation<Work>(
                         .trace_buffer
                         .set_text(&operation_log(&result.report));
                     if let Some(error) = result.error {
+                        let mapped = i18n::git_error(&AppError::Git(error));
                         callback_dialog.result_label.set_label(&format!(
-                            "{}：{error}",
+                            "{}：{}",
                             i18n::text(UiMessage::GitStopStage {
                                 stage: "operation".into()
-                            })
+                            }),
+                            i18n::text(mapped.message.clone())
                         ));
-                        show_error(&widgets, &i18n::text(UiMessage::GitOperationIncomplete));
+                        show_user_facing(&widgets, mapped);
                     } else {
                         let done = i18n::text(UiMessage::GitOperationDone);
                         callback_dialog.result_label.set_label(&done);
@@ -1097,16 +1101,18 @@ fn execute_operation<Work>(
                     }
                 }
                 Err(error) => {
+                    let mapped = i18n::git_error(&error);
                     callback_dialog.result_label.set_label(&format!(
-                        "{}：{error}",
+                        "{}：{}",
                         i18n::text(UiMessage::GitStopStage {
                             stage: "before command".into(),
-                        })
+                        }),
+                        i18n::text(mapped.message.clone())
                     ));
                     callback_dialog
                         .trace_buffer
                         .set_text(&i18n::text(UiMessage::GitNoExternalCommand));
-                    show_error(&widgets, &error.to_string());
+                    show_user_facing(&widgets, mapped);
                 }
             }
             callback_dialog.finish();
@@ -1398,12 +1404,11 @@ pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
                     super::sync_controls(&widgets, &state);
                 }
                 Err(error) => {
-                    widgets.git_panel.set_error(&error.to_string());
+                    widgets
+                        .git_panel
+                        .set_error(&i18n::text(UiMessage::GitStatusReadFailed));
                     super::sync_controls(&widgets, &state);
-                    show_error(
-                        &widgets,
-                        &format!("{}: {error}", i18n::text(UiMessage::GitStatusReadFailed)),
-                    );
+                    show_user_facing_error(&widgets, &error);
                 }
             }
         },
