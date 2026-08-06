@@ -1,3 +1,4 @@
+mod app;
 mod preview;
 mod search;
 mod tasks;
