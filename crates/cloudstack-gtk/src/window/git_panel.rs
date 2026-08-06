@@ -1377,4 +1377,52 @@ mod tests {
             PrimaryAction::Commit
         );
     }
+
+    #[test]
+    fn no_commit_with_managed_changes_recommends_commit() {
+        assert_eq!(
+            recommended_action(&snapshot(
+                RepositoryTopology::NoCommit,
+                SyncRelation::Unknown,
+                1,
+                0,
+                0,
+                0,
+            )),
+            PrimaryAction::Commit
+        );
+    }
+
+    #[test]
+    fn no_commit_without_managed_changes_currently_uses_commit_path() {
+        // 这是当前行为探针，不预先替产品决定“空仓库”最终应该显示什么。
+        assert_eq!(
+            recommended_action(&snapshot(
+                RepositoryTopology::NoCommit,
+                SyncRelation::Unknown,
+                0,
+                0,
+                0,
+                0,
+            )),
+            PrimaryAction::Commit
+        );
+    }
+
+    #[test]
+    fn no_commit_with_only_unmanaged_changes_currently_uses_commit_path() {
+        // 受管范围为空时，当前推荐动作仍由 NoCommit 分支决定；是否改变它
+        // 留待产品语义确认后再调整。
+        assert_eq!(
+            recommended_action(&snapshot(
+                RepositoryTopology::NoCommit,
+                SyncRelation::Unknown,
+                0,
+                1,
+                0,
+                0,
+            )),
+            PrimaryAction::Commit
+        );
+    }
 }

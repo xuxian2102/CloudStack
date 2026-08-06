@@ -1807,4 +1807,27 @@ mod tests {
         assert!(model.frontmatter_panel_enabled);
         assert!(model.post_list_enabled);
     }
+
+    #[test]
+    fn controls_for_clean_current_document_keeps_other_unsaved_state_separate() {
+        let mut unsaved_documents = HashMap::new();
+        unsaved_documents.insert("other.md".to_string(), sample_document());
+        let state = EditorState {
+            project: Some(sample_project()),
+            document: Some(sample_document()),
+            dirty: false,
+            unsaved_documents,
+            ..Default::default()
+        };
+
+        let model = controls_for(&state);
+        assert!(
+            !model.save_enabled,
+            "当前文章干净时不应显示当前文章保存按钮"
+        );
+        assert!(!model.git_dirty, "Git 面板的未保存标记只反映当前文章");
+        assert!(model.editor_editable);
+        assert!(model.post_list_enabled);
+        assert!(model.git_reflect_enabled);
+    }
 }
