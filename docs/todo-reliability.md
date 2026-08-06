@@ -50,7 +50,7 @@
 
 ## 新增 `cloudstack-application` crate（用户提出，2026-08-07，P1 收尾后的下一步）
 
-**状态：第 1～5 项已完成（分五轮实施，测试数量全程守恒可核对到 259，`cargo tree -p cloudstack-application --edges normal` 确认零 GTK/GLib/GIO/Adwaita/WebKit 依赖，且不依赖 `cloudstack-renderer`）。第 6～8 项尚未开始。**
+**状态：第 1～6 项已完成（分六轮实施，测试数量全程守恒可核对到 266，`cargo tree -p cloudstack-application --edges normal` 确认零 GTK/GLib/GIO/Adwaita/WebKit 依赖，且不依赖 `cloudstack-renderer`）。第 7～8 项尚未开始。**
 
 ```text
 第 1 轮：新建 crate + 迁移 save/settings/git_refresh          [x] 21 个测试
@@ -58,7 +58,7 @@
 第 3 轮：ControlModel → WorkspaceCapabilities                [x]  7 个测试
 第 4 轮：PreviewCoordinator（含"撤销覆盖预览"正确性修复）      [x]  4 个测试
 第 5 轮：Recent 状态协调（恢复选择规则 + LastDocumentWriter）  [x] 11 个测试
-第 6 项：PublishPlan                                          [ ] 未开始
+第 6 轮：PublishPlan                                          [x]  8 个测试
 第 7 项：DraftCoordinator                                     [ ] 未开始
 第 8 项：OpenWorkspace use case                               [ ] 未开始
 ```
@@ -105,12 +105,27 @@ cloudstack-gtk ───────→ cloudstack-application ─────�
 
    **测试比原计划多一个**：除了迁移原有 5 个 `choose_document_to_restore_*` 测试、新增 2 个项目重开测试、新增 3 个 writer 测试（共 10 个）之外，额外补了 `choose_document_to_restore_returns_none_when_project_root_changed`——旧的布尔参数签名把"项目 root 是否还是当时那个"这条判断隐藏在调用方预算好的 `project_still_current: bool` 里，没法单独测；改成结构体输入、函数内部直接做比较之后，这条判断本身变成了函数逻辑的一部分，值得单独覆盖。因此 `cloudstack-application` 实际是 40 → 51（不是预想的 50），总数 253 → 259（不是预想的 258）。
 
-6. **发布选择模型**：`publish.rs` 当前把应用模型和控件混在一起（`ArticleChoice { article_id, paths, checkbox: gtk::CheckButton }`）。应迁出的逻辑：`article_for_git_path()`、按文章分组 Git changes、计算默认选中状态/selected paths、更新 excluded articles、判断当前状态是否允许发布、commit message 是否有效。改成纯模型：
+6. [x] **发布选择模型**：`window/publish.rs` 原来把应用模型和控件混在一起（`ArticleChoice { article_id, paths, checkbox: gtk::CheckButton }`）的做法已经拆开。迁入 `cloudstack-application/src/publish.rs`：
    ```rust
    pub struct PublishChoice { pub article_id: Option<String>, pub paths: Vec<String>, pub selected: bool }
-   pub struct PublishPlan { pub choices: Vec<PublishChoice>, pub can_publish: bool, pub blocker: Option<PublishBlocker> }
+   pub enum PublishStatusBlocker { Conflicts, BehindRemote, NoManagedChanges }
+   pub enum PublishBlocker { Working, Status(PublishStatusBlocker), NoSelection, EmptyMessage }
+   pub struct PublishSubmission { pub message: String, pub push: bool, pub selected_paths: Vec<String>, pub updated_exclusions: Option<Vec<String>> }
+   pub struct PublishPlan { .. }
+   impl PublishPlan {
+       pub fn new(context: &ProjectContext, posts: &[PostSummary], status: &GitStatus) -> Self;
+       pub fn choices(&self) -> &[PublishChoice];
+       pub fn set_selected(&mut self, index: usize, selected: bool);
+       pub fn update_status(&mut self, status: &GitStatus);
+       pub fn status_blocker(&self) -> Option<PublishStatusBlocker>;
+       pub fn has_upstream(&self) -> bool;
+       pub fn blocker(&self, message: &str, working: bool) -> Option<PublishBlocker>;
+       pub fn prepare_submission(&self, message: &str, push_requested: bool, remember_choices: bool, working: bool) -> Result<PublishSubmission, PublishBlocker>;
+   }
    ```
-   GTK 再从 `PublishChoice` 创建 checkbox。`publish_summary()` 这类生成本地化文字的留在 presentation 层，application 最多返回结构化的 `PublishOutcome`。
+   `article_for_git_path()`（含"嵌套文章优先于外层资产目录"的分组规则）作为私有辅助函数一并迁入并保留原逻辑不变。GTK 侧 `PublishDialog` 现在只持有 `plan: RefCell<PublishPlan>` + `choice_buttons: Vec<gtk::CheckButton>`，`apply_status()`/`set_working()`/`sync_publish_button()` 改成读取 `plan` 的只读方法；发布按钮点击回调改成调用 `plan.borrow().prepare_submission(...)`，按返回的 `Result` 早退或解构 `PublishSubmission` 派发后台任务，后台闭包按 `updated_exclusions: Option<Vec<String>>` 是否为 `Some` 决定要不要重写项目配置。`publish_summary()`、`publish_operation_log()`、`detail_label()`、`localized_change_line()`、`change_kind_symbol()`、`MAX_STATUS_CHANGES` 等生成本地化文字/展示布局的逻辑原样留在 GTK presentation 层，没有顺带迁移真实 Git 发布 use case（`git::publish_selected` 调用仍在 GTK），也没有做 commit message hardening，严格按用户要求的范围执行。
+
+   **测试**：8 个测试全部按预期迁入/新增（`nested_article_wins_over_an_outer_asset_directory` 从 GTK 迁移，其余 7 个为新增：`publish_plan_groups_article_and_colocated_assets`、`deleted_article_is_still_exposed_as_an_article_choice`、`excluded_articles_start_unselected_but_other_managed_paths_remain_selected`、`renamed_article_submission_includes_old_and_new_paths`、`submission_uses_current_selection_and_updates_exclusions`、`conflicts_behind_and_no_managed_changes_block_submission`、`working_empty_message_and_empty_selection_block_submission`）。`cloudstack-application` 51 → 59（+8），`cloudstack-gtk` 因为迁走了那一个测试 44 → 43（-1），workspace 总数 259 → 266（application 59、core 155、gtk 43、renderer 9），与预期完全吻合，没有偏差需要说明。
 
 7. **草稿队列和批量保存**：`window/drafts.rs` 是目前 GTK 层最值得拆、同时改动也最大的一块，混合了草稿主目录/旧目录回退、FIFO operation queue、single-flight 执行、批量保存/丢弃、草稿恢复资格判断、completion 后更新 session、对话框和 toast。建议拆成：
    ```text

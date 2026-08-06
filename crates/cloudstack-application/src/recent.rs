@@ -1,5 +1,5 @@
 //! "最近项目/文章"相关的纯选择规则和写入协调，不碰文件、不发后台任务。
-//! `cloudstack-gtk` 负责实际读写 `recent.json`/`settings.json`、派发
+//! `cloudstack-gtk` 负责实际读写 `recent-projects.json`/`settings.json`、派发
 //! `tasks::run`、维护 `thread_local!` 运行时实例；这里只回答"该恢复哪一个"
 //! 和"下一次该写哪一个"。
 

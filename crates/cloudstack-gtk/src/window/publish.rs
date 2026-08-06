@@ -1,9 +1,8 @@
-use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
+use cloudstack_application::publish::{PublishPlan, PublishStatusBlocker, PublishSubmission};
 use cloudstack_core::model::{ChangeKind, GitStatus, PostSummary, ProjectContext, PublishResult};
 use cloudstack_core::services::{git, project};
 
@@ -21,7 +20,8 @@ struct PublishDialog {
     branch_label: gtk::Label,
     upstream_label: gtk::Label,
     changes_label: gtk::Label,
-    article_choices: Vec<ArticleChoice>,
+    plan: RefCell<PublishPlan>,
+    choice_buttons: Vec<gtk::CheckButton>,
     remember_choices: gtk::CheckButton,
     message_entry: gtk::Entry,
     push_check: gtk::CheckButton,
@@ -29,15 +29,7 @@ struct PublishDialog {
     spinner: gtk::Spinner,
     result_label: gtk::Label,
     trace_buffer: gtk::TextBuffer,
-    status_allows_publish: Cell<bool>,
-    has_upstream: Cell<bool>,
     working: Cell<bool>,
-}
-
-struct ArticleChoice {
-    article_id: Option<String>,
-    paths: Vec<String>,
-    checkbox: gtk::CheckButton,
 }
 
 impl PublishDialog {
@@ -71,12 +63,28 @@ impl PublishDialog {
             .child(&changes_frame)
             .build();
 
-        let article_choices = build_article_choices(context, posts, status);
+        let plan = PublishPlan::new(context, posts, status);
+        let choice_buttons = plan
+            .choices()
+            .iter()
+            .map(|choice| {
+                let label = choice
+                    .article_id
+                    .clone()
+                    .unwrap_or_else(|| choice.paths.first().cloned().unwrap_or_default());
+                let checkbox = gtk::CheckButton::with_label(&label);
+                checkbox.set_active(choice.selected);
+                checkbox.set_tooltip_text(Some(&i18n::text(UiMessage::GitManagedPathCount {
+                    count: choice.paths.len(),
+                })));
+                checkbox
+            })
+            .collect::<Vec<_>>();
         let choices_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        for choice in &article_choices {
-            choices_box.append(&choice.checkbox);
+        for checkbox in &choice_buttons {
+            choices_box.append(checkbox);
         }
-        if article_choices.is_empty() {
+        if choice_buttons.is_empty() {
             choices_box.append(
                 &gtk::Label::builder()
                     .label(i18n::text(UiMessage::GitNoSelectableChanges))
@@ -174,7 +182,8 @@ impl PublishDialog {
             branch_label,
             upstream_label,
             changes_label,
-            article_choices,
+            plan: RefCell::new(plan),
+            choice_buttons,
             remember_choices,
             message_entry,
             push_check,
@@ -182,8 +191,6 @@ impl PublishDialog {
             spinner,
             result_label,
             trace_buffer,
-            status_allows_publish: Cell::new(false),
-            has_upstream: Cell::new(false),
             working: Cell::new(false),
         });
         this.apply_status(status);
@@ -193,10 +200,14 @@ impl PublishDialog {
                 dialog.sync_publish_button();
             }
         });
-        for choice in &this.article_choices {
+        for (index, checkbox) in this.choice_buttons.iter().enumerate() {
             let weak = Rc::downgrade(&this);
-            choice.checkbox.connect_toggled(move |_| {
+            checkbox.connect_toggled(move |checkbox| {
                 if let Some(dialog) = weak.upgrade() {
+                    dialog
+                        .plan
+                        .borrow_mut()
+                        .set_selected(index, checkbox.is_active());
                     dialog.sync_publish_button();
                 }
             });
@@ -221,9 +232,6 @@ impl PublishDialog {
                 ahead: status.ahead,
                 behind: status.behind,
             }));
-        self.push_check.set_sensitive(status.upstream.is_some());
-        self.push_check.set_active(status.upstream.is_some());
-        self.has_upstream.set(status.upstream.is_some());
 
         if status.changes.is_empty() {
             self.changes_label
@@ -244,22 +252,27 @@ impl PublishDialog {
             self.changes_label.set_label(&lines.join("\n"));
         }
 
-        let has_managed = status.changes.iter().any(|change| change.managed);
-        let has_conflict = status
-            .changes
-            .iter()
-            .any(|change| change.kind == ChangeKind::Unmerged);
-        self.status_allows_publish
-            .set(has_managed && !has_conflict && status.behind == 0);
-        if has_conflict && self.result_label.label().is_empty() {
-            self.result_label
-                .set_label(&i18n::text(UiMessage::GitConflictStatus))
-        } else if status.behind > 0 && self.result_label.label().is_empty() {
-            self.result_label
-                .set_label(&i18n::text(UiMessage::GitBehindStatus))
-        } else if !has_managed && self.result_label.label().is_empty() {
-            self.result_label
-                .set_label(&i18n::text(UiMessage::GitNoManagedChanges))
+        let (has_upstream, status_blocker) = {
+            let mut plan = self.plan.borrow_mut();
+            plan.update_status(status);
+            (plan.has_upstream(), plan.status_blocker())
+        };
+        self.push_check.set_sensitive(has_upstream);
+        self.push_check.set_active(has_upstream);
+
+        if self.result_label.label().is_empty() {
+            match status_blocker {
+                Some(PublishStatusBlocker::Conflicts) => self
+                    .result_label
+                    .set_label(&i18n::text(UiMessage::GitConflictStatus)),
+                Some(PublishStatusBlocker::BehindRemote) => self
+                    .result_label
+                    .set_label(&i18n::text(UiMessage::GitBehindStatus)),
+                Some(PublishStatusBlocker::NoManagedChanges) => self
+                    .result_label
+                    .set_label(&i18n::text(UiMessage::GitNoManagedChanges)),
+                None => {}
+            }
         }
         self.sync_publish_button();
     }
@@ -269,10 +282,10 @@ impl PublishDialog {
         self.dialog.set_can_close(!working);
         self.message_entry.set_sensitive(!working);
         self.push_check
-            .set_sensitive(!working && self.has_upstream.get());
+            .set_sensitive(!working && self.plan.borrow().has_upstream());
         self.remember_choices.set_sensitive(!working);
-        for choice in &self.article_choices {
-            choice.checkbox.set_sensitive(!working);
+        for checkbox in &self.choice_buttons {
+            checkbox.set_sensitive(!working);
         }
         self.spinner.set_visible(working);
         if working {
@@ -284,141 +297,13 @@ impl PublishDialog {
     }
 
     fn sync_publish_button(&self) {
-        self.publish_button.set_sensitive(
-            !self.working.get()
-                && self.status_allows_publish.get()
-                && self
-                    .article_choices
-                    .iter()
-                    .any(|choice| choice.checkbox.is_active())
-                && !self.message_entry.text().trim().is_empty(),
-        );
+        let blocked = self
+            .plan
+            .borrow()
+            .blocker(&self.message_entry.text(), self.working.get())
+            .is_some();
+        self.publish_button.set_sensitive(!blocked);
     }
-
-    fn selected_paths(&self) -> Vec<String> {
-        self.article_choices
-            .iter()
-            .filter(|choice| choice.checkbox.is_active())
-            .flat_map(|choice| choice.paths.iter().cloned())
-            .collect()
-    }
-
-    fn updated_exclusions(&self, context: &ProjectContext) -> Vec<String> {
-        let mut excluded = context
-            .config
-            .git
-            .excluded_articles
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        for choice in &self.article_choices {
-            let Some(article) = &choice.article_id else {
-                continue;
-            };
-            if choice.checkbox.is_active() {
-                excluded.remove(article);
-            } else {
-                excluded.insert(article.clone());
-            }
-        }
-        excluded.into_iter().collect()
-    }
-}
-
-fn build_article_choices(
-    context: &ProjectContext,
-    posts: &[PostSummary],
-    status: &GitStatus,
-) -> Vec<ArticleChoice> {
-    let content_prefix = format!("{}/", context.config.content_dir.trim_end_matches('/'));
-    let mut article_ids = posts
-        .iter()
-        .map(|post| post.id.clone())
-        .collect::<BTreeSet<_>>();
-    for change in status.changes.iter().filter(|change| change.managed) {
-        if let Some(relative) = change.path.strip_prefix(&content_prefix) {
-            let extension = Path::new(relative)
-                .extension()
-                .and_then(|extension| extension.to_str());
-            if extension.is_some_and(|extension| {
-                context
-                    .config
-                    .extensions
-                    .iter()
-                    .any(|allowed| allowed.strip_prefix('.') == Some(extension))
-            }) {
-                article_ids.insert(relative.to_owned());
-            }
-        }
-    }
-
-    let mut groups: BTreeMap<String, (Option<String>, Vec<String>)> = BTreeMap::new();
-    for change in status.changes.iter().filter(|change| change.managed) {
-        let article = article_for_git_path(context, &article_ids, &change.path);
-        let key = article.as_ref().map_or_else(
-            || format!("path:{}", change.path),
-            |id| format!("article:{id}"),
-        );
-        let entry = groups.entry(key).or_insert_with(|| (article, Vec::new()));
-        entry.1.push(change.path.clone());
-        if let Some(old_path) = &change.old_path {
-            if old_path == context.config.content_dir.as_str()
-                || old_path.starts_with(&content_prefix)
-            {
-                entry.1.push(old_path.clone());
-            }
-        }
-    }
-
-    groups
-        .into_values()
-        .map(|(article_id, mut paths)| {
-            paths.sort();
-            paths.dedup();
-            let label = article_id
-                .clone()
-                .unwrap_or_else(|| paths.first().cloned().unwrap_or_default());
-            let active = article_id.as_ref().is_none_or(|article| {
-                !context
-                    .config
-                    .git
-                    .excluded_articles
-                    .iter()
-                    .any(|excluded| excluded == article)
-            });
-            let checkbox = gtk::CheckButton::with_label(&label);
-            checkbox.set_active(active);
-            let tooltip = i18n::text(UiMessage::GitManagedPathCount { count: paths.len() });
-            checkbox.set_tooltip_text(Some(&tooltip));
-            ArticleChoice {
-                article_id,
-                paths,
-                checkbox,
-            }
-        })
-        .collect()
-}
-
-fn article_for_git_path(
-    context: &ProjectContext,
-    article_ids: &BTreeSet<String>,
-    path: &str,
-) -> Option<String> {
-    let content_prefix = format!("{}/", context.config.content_dir.trim_end_matches('/'));
-    let relative = path.strip_prefix(&content_prefix)?;
-    if article_ids.contains(relative) {
-        return Some(relative.to_owned());
-    }
-    article_ids
-        .iter()
-        .filter(|article| {
-            let asset_prefix = article
-                .rsplit_once('.')
-                .map_or_else(|| format!("{article}/"), |(stem, _)| format!("{stem}/"));
-            relative.starts_with(&asset_prefix)
-        })
-        .max_by_key(|article| article.len())
-        .cloned()
 }
 
 pub(super) fn show_dialog(widgets: &Widgets, state: &Rc<std::cell::RefCell<EditorState>>) {
@@ -464,14 +349,25 @@ fn present_dialog(
     let callback_widgets = widgets.clone();
     let callback_state = Rc::clone(state);
     dialog.publish_button.connect_clicked(move |_| {
-        let message = callback_dialog.message_entry.text().trim().to_owned();
-        if message.is_empty() || callback_dialog.working.get() {
+        let submission = {
+            let plan = callback_dialog.plan.borrow();
+            plan.prepare_submission(
+                &callback_dialog.message_entry.text(),
+                callback_dialog.push_check.is_active(),
+                callback_dialog.remember_choices.is_active(),
+                callback_dialog.working.get(),
+            )
+        };
+        let Ok(submission) = submission else {
             return;
-        }
-        let push = callback_dialog.push_check.is_active();
-        let selected_paths = callback_dialog.selected_paths();
-        let remember_choices = callback_dialog.remember_choices.is_active();
-        let updated_exclusions = callback_dialog.updated_exclusions(&context);
+        };
+        let PublishSubmission {
+            message,
+            push,
+            selected_paths,
+            updated_exclusions,
+        } = submission;
+
         callback_dialog
             .result_label
             .set_label(&i18n::text(UiMessage::GitStagingStatus));
@@ -490,12 +386,13 @@ fn present_dialog(
         let task_state = Rc::clone(&callback_state);
         tasks::run(
             move || {
-                let task_context = if remember_choices {
-                    let mut config = task_context.config.clone();
-                    config.git.excluded_articles = updated_exclusions;
-                    project::write_project_config(&task_context, config)?
-                } else {
-                    task_context
+                let task_context = match updated_exclusions {
+                    Some(exclusions) => {
+                        let mut config = task_context.config.clone();
+                        config.git.excluded_articles = exclusions;
+                        project::write_project_config(&task_context, config)?
+                    }
+                    None => task_context,
                 };
                 let result = git::publish_selected(&task_context, &message, push, &selected_paths)?;
                 Ok((result, task_context))
@@ -709,34 +606,5 @@ mod tests {
         assert!(log.contains("$ git push"));
         assert!(log.contains("退出: 0"));
         assert!(log.contains("ok"));
-    }
-
-    #[test]
-    fn nested_article_wins_over_an_outer_asset_directory() {
-        let root = std::path::PathBuf::from("/tmp/cloudstack-publish-group-test");
-        let context = ProjectContext {
-            content_root: root.join("src/content/blog"),
-            config_path: root.join(".cloudstack.json"),
-            root,
-            config: Default::default(),
-        };
-        let articles = ["hello.md".to_string(), "hello/nested.md".to_string()]
-            .into_iter()
-            .collect();
-
-        assert_eq!(
-            article_for_git_path(&context, &articles, "src/content/blog/hello/nested.md")
-                .as_deref(),
-            Some("hello/nested.md")
-        );
-        assert_eq!(
-            article_for_git_path(
-                &context,
-                &articles,
-                "src/content/blog/hello/nested/photo.png"
-            )
-            .as_deref(),
-            Some("hello/nested.md")
-        );
     }
 }
