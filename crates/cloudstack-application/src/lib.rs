@@ -8,6 +8,7 @@ pub mod controls;
 pub mod git;
 pub mod git_refresh;
 pub mod preview;
+pub mod recent;
 pub mod save;
 pub mod settings;
 

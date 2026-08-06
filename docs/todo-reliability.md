@@ -50,14 +50,14 @@
 
 ## 新增 `cloudstack-application` crate（用户提出，2026-08-07，P1 收尾后的下一步）
 
-**状态：第 1～4 项已完成（分四轮实施，测试数量全程守恒 253，`cargo tree -p cloudstack-application --edges normal` 确认零 GTK/GLib/GIO/Adwaita/WebKit 依赖，且不依赖 `cloudstack-renderer`）。第 5～8 项尚未开始。**
+**状态：第 1～5 项已完成（分五轮实施，测试数量全程守恒可核对到 259，`cargo tree -p cloudstack-application --edges normal` 确认零 GTK/GLib/GIO/Adwaita/WebKit 依赖，且不依赖 `cloudstack-renderer`）。第 6～8 项尚未开始。**
 
 ```text
 第 1 轮：新建 crate + 迁移 save/settings/git_refresh          [x] 21 个测试
 第 2 轮：Git 主操作决策迁移（PrimaryGitAction/EffectiveGitAction） [x]  8 个测试
 第 3 轮：ControlModel → WorkspaceCapabilities                [x]  7 个测试
 第 4 轮：PreviewCoordinator（含"撤销覆盖预览"正确性修复）      [x]  4 个测试
-第 5 项：Recent 状态协调 / LatestWriteCoordinator             [ ] 未开始
+第 5 轮：Recent 状态协调（恢复选择规则 + LastDocumentWriter）  [x] 11 个测试
 第 6 项：PublishPlan                                          [ ] 未开始
 第 7 项：DraftCoordinator                                     [ ] 未开始
 第 8 项：OpenWorkspace use case                               [ ] 未开始
@@ -94,8 +94,16 @@ cloudstack-gtk ───────→ cloudstack-application ─────�
 
 4. [x] **预览任务状态机**：`preview.rs` 里原来的 `RenderRequest`/`QueueState`/`should_apply()`/`debounce_duration()` 已迁入并重构成 `cloudstack-application/src/preview.rs` 的 `PreviewCoordinator`（`PreviewTicket`/`PreviewRequest`/`PreviewAction`/`PreviewCompletion` + `set_document`/`clear`/`schedule`/`debounce_elapsed`/`complete_render`）。GTK 侧 `Inner` 只保留 `timeout: RefCell<Option<glib::SourceId>>`（实际 GLib 定时器，coordinator 不持有）和 `coordinator: RefCell<PreviewCoordinator>`，新增 `dispatch_action`/`cancel_timeout` 两个小 adapter；WebKit shell、JS 调用、URI scheme、编辑器与预览滚动同步等继续留在 GTK。`cloudstack-application` 不依赖 `cloudstack-renderer`——coordinator 只协调"什么时候该渲染哪段文本"，真正的 Markdown → HTML 转换仍由 GTK 持有的 `MarkdownRenderer` 完成。
    **顺手修的正确性问题**：原来的 `schedule()` 会在"新正文等于上次已应用内容"时直接提前返回，不取消尚未开始的 debounce/不推进 generation。场景：预览显示 A → 用户输入 B（进入 debounce 或已经在后台渲染）→ 用户快速撤销回 A → 因为 A 等于 last_applied 就什么都不做 → B 没被取消或失效 → B 最终完成后覆盖掉本该保持是 A 的预览。修复后 `schedule()` 无论是否需要重新渲染，都先无条件清空 `pending`/`debounced` 并推进 `generation`，让任何还在飞行或排队的旧请求（不管是不是恰好等于新内容）在完成时因为 generation 不匹配而被拒绝应用。新增回归测试 `returning_to_last_applied_source_invalidates_newer_render`，覆盖"B 还在 debounce"和"B 已经在后台渲染"两种子场景。
+   **非阻塞的补充测试建议（未实施，留给以后方便时再做）**：补一个覆盖 debounce 与 active 交错时序的测试 `active_render_and_debounce_handoff_works_in_both_orders`——分别验证"debounce timer 先到、request 进入 pending，然后 active 完成并启动它"和"active 先完成、timer 后到，request 直接成为 active"两种顺序。当前实现对这两种顺序的处理逻辑看起来都正确，不阻塞任何提交。
 
-5. **Recent 状态协调**：`window/recent.rs` 里不止 `choose_document_to_restore()` 能迁——恢复上次文章的条件判断、查找真正最近打开的项目、`LastDocumentWrite` 的 single-writer/latest-value coalescing 都能迁。当前"最后文章写入"协调器由 `thread_local!` + `in_flight` + `pending` 组成，本质上跟 `SettingsWriter` 是同一种应用状态机（`LatestWriteCoordinator<T>` 或专用的 `LastDocumentWriter { in_flight, pending }`）。不建议为了复用强行做高度泛型，两个明确的小状态机通常更容易读。
+5. [x] **Recent 状态协调**：`window/recent.rs` 里的三块纯规则/状态机已迁入 `cloudstack-application/src/recent.rs`（模块本身不在 crate 根重新导出，保持 `recent::` 领域命名）：
+   - `choose_document_to_restore()` 从六个位置参数（含四个调用方预先算好的布尔值）改成 `DocumentRestoreInput`，函数内部直接比较 `current_project_root`/`expected_project_root` 和两个 epoch，而不是信任调用方传入的预算布尔值。
+   - 新增 `choose_project_to_reopen()`/`ProjectReopenInput`，把"按 `last_opened_ms` 找真正最近打开的项目、而不是直接拿 pinned 排序后的列表第一项"这条规则从 `maybe_reopen_last_project()` 里搬出来。
+   - `LastDocumentWrite`（原来只有 `in_flight: bool` + `pending`）重构成专用的 `LastDocumentWriter { next_generation, in_flight: Option<LastDocumentWrite>, pending: Option<LastDocumentWrite> }`，用 generation 防止迟到/错配的 completion 误清当前 active 状态。没有为了和 `SettingsWriter` 复用而做通用 `LatestWriteCoordinator<T>`，两个专用状态机分开写。
+
+   `thread_local!` 运行时实例、`tasks::run` 派发、`recent::load/touch/set_last_document` 等实际读写、`app_data_dir`、欢迎页绑定都保留在 GTK；GTK 只负责按 application 返回的 `*Action`/`Option<...>` 执行副作用。
+
+   **测试比原计划多一个**：除了迁移原有 5 个 `choose_document_to_restore_*` 测试、新增 2 个项目重开测试、新增 3 个 writer 测试（共 10 个）之外，额外补了 `choose_document_to_restore_returns_none_when_project_root_changed`——旧的布尔参数签名把"项目 root 是否还是当时那个"这条判断隐藏在调用方预算好的 `project_still_current: bool` 里，没法单独测；改成结构体输入、函数内部直接做比较之后，这条判断本身变成了函数逻辑的一部分，值得单独覆盖。因此 `cloudstack-application` 实际是 40 → 51（不是预想的 50），总数 253 → 259（不是预想的 258）。
 
 6. **发布选择模型**：`publish.rs` 当前把应用模型和控件混在一起（`ArticleChoice { article_id, paths, checkbox: gtk::CheckButton }`）。应迁出的逻辑：`article_for_git_path()`、按文章分组 Git changes、计算默认选中状态/selected paths、更新 excluded articles、判断当前状态是否允许发布、commit message 是否有效。改成纯模型：
    ```rust
