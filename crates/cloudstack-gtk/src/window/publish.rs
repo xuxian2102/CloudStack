@@ -11,6 +11,7 @@ use super::{
     git_panel, git_panel::operation_log, has_unsaved_documents, set_busy, show_error, toast,
     EditorState, Widgets,
 };
+use crate::i18n::{self, UiMessage};
 use crate::tasks;
 
 const MAX_STATUS_CHANGES: usize = 100;
@@ -48,12 +49,16 @@ impl PublishDialog {
         changes_label.set_wrap(true);
 
         let status_group = adw::PreferencesGroup::builder()
-            .title("仓库状态")
-            .description("只提交下方勾选的文章及其图片；CloudStack 配置和其他文件不会提交。")
+            .title(i18n::text(UiMessage::GitPublishRepositoryStatus))
+            .description(i18n::text(UiMessage::GitPublishRepositoryDescription))
             .build();
-        let branch_row = adw::ActionRow::builder().title("分支").build();
+        let branch_row = adw::ActionRow::builder()
+            .title(i18n::text(UiMessage::GitBranchLabel))
+            .build();
         branch_row.add_suffix(&branch_label);
-        let upstream_row = adw::ActionRow::builder().title("上游").build();
+        let upstream_row = adw::ActionRow::builder()
+            .title(i18n::text(UiMessage::GitUpstreamLabel))
+            .build();
         upstream_row.add_suffix(&upstream_label);
         status_group.add(&branch_row);
         status_group.add(&upstream_row);
@@ -74,27 +79,28 @@ impl PublishDialog {
         if article_choices.is_empty() {
             choices_box.append(
                 &gtk::Label::builder()
-                    .label("没有可选择的文章改动")
+                    .label(i18n::text(UiMessage::GitNoSelectableChanges))
                     .xalign(0.0)
                     .css_classes(["dim-label"])
                     .build(),
             );
         }
         let choices_group = adw::PreferencesGroup::builder()
-            .title("本次提交")
-            .description("取消勾选可跳过文章；记住选择后，下次仍保持排除。")
+            .title(i18n::text(UiMessage::GitThisCommit))
+            .description(i18n::text(UiMessage::GitThisCommitDescription))
             .build();
         let choices_row = adw::PreferencesRow::new();
         choices_row.set_child(Some(&choices_box));
         choices_group.add(&choices_row);
-        let remember_choices = gtk::CheckButton::with_label("记住文章选择");
+        let remember_choices =
+            gtk::CheckButton::with_label(&i18n::text(UiMessage::GitRememberArticleSelection));
         remember_choices.set_active(true);
 
         let message_entry = gtk::Entry::builder()
-            .placeholder_text("提交信息（必填）")
+            .placeholder_text(i18n::text(UiMessage::GitCommitMessagePlaceholder))
             .activates_default(true)
             .build();
-        let push_check = gtk::CheckButton::with_label("提交后推送到 upstream");
+        let push_check = gtk::CheckButton::with_label(&i18n::text(UiMessage::GitPushAfterCommit));
         let result_label = gtk::Label::builder()
             .xalign(0.0)
             .wrap(true)
@@ -125,7 +131,7 @@ impl PublishDialog {
             .child(&trace_view)
             .build();
         let trace_expander = gtk::Expander::builder()
-            .label("执行记录")
+            .label(i18n::text(UiMessage::GitExecutionLog))
             .child(&trace_scroll)
             .build();
         form.append(&trace_expander);
@@ -143,12 +149,13 @@ impl PublishDialog {
         let spinner = gtk::Spinner::new();
         spinner.set_visible(false);
         let publish_button = gtk::Button::builder()
-            .label("发布")
+            .label(i18n::text(UiMessage::GitPublish))
             .css_classes(["suggested-action"])
             .sensitive(false)
             .build();
         let header = adw::HeaderBar::new();
-        header.set_title_widget(Some(&gtk::Label::new(Some("提交与推送"))));
+        let title = i18n::text(UiMessage::GitCommitAndPushTitle);
+        header.set_title_widget(Some(&gtk::Label::new(Some(&title))));
         header.pack_end(&spinner);
         header.pack_end(&publish_button);
 
@@ -156,7 +163,7 @@ impl PublishDialog {
         toolbar.add_top_bar(&header);
         toolbar.set_content(Some(&content));
         let dialog = adw::Dialog::builder()
-            .title("提交与推送")
+            .title(title)
             .content_width(620)
             .content_height(540)
             .child(&toolbar)
@@ -199,18 +206,28 @@ impl PublishDialog {
 
     fn apply_status(&self, status: &GitStatus) {
         self.branch_label
-            .set_label(status.branch.as_deref().unwrap_or("分离 HEAD"));
-        let upstream = status.upstream.as_deref().unwrap_or("未配置");
-        self.upstream_label.set_label(&format!(
-            "{upstream} · ahead {} / behind {}",
-            status.ahead, status.behind
-        ));
+            .set_label(status.branch.as_deref().unwrap_or(""));
+        if status.branch.is_none() {
+            self.branch_label
+                .set_label(&i18n::text(UiMessage::GitBranchDetached));
+        }
+        let upstream = status
+            .upstream
+            .clone()
+            .unwrap_or_else(|| i18n::text(UiMessage::GitUpstreamNotConfigured));
+        self.upstream_label
+            .set_label(&i18n::text(UiMessage::GitUpstreamStatus {
+                upstream,
+                ahead: status.ahead,
+                behind: status.behind,
+            }));
         self.push_check.set_sensitive(status.upstream.is_some());
         self.push_check.set_active(status.upstream.is_some());
         self.has_upstream.set(status.upstream.is_some());
 
         if status.changes.is_empty() {
-            self.changes_label.set_label("工作区没有改动");
+            self.changes_label
+                .set_label(&i18n::text(UiMessage::GitWorkspaceNoChanges));
         } else {
             let mut lines = status
                 .changes
@@ -218,29 +235,11 @@ impl PublishDialog {
                 .filter(|change| change.managed)
                 .chain(status.changes.iter().filter(|change| !change.managed))
                 .take(MAX_STATUS_CHANGES)
-                .map(|change| {
-                    let scope = if change.managed {
-                        "受管"
-                    } else {
-                        "非受管"
-                    };
-                    let staged = if change.staged { "，已暂存" } else { "" };
-                    let renamed = change
-                        .old_path
-                        .as_deref()
-                        .map(|old| format!("（{old} → {}）", change.path))
-                        .unwrap_or_else(|| change.path.clone());
-                    format!(
-                        "{}  [{scope}{staged}] {renamed}",
-                        change_kind_symbol(change.kind)
-                    )
-                })
+                .map(localized_change_line)
                 .collect::<Vec<_>>();
             let omitted = status.changes.len().saturating_sub(lines.len());
             if omitted > 0 {
-                lines.push(format!(
-                    "… 还有 {omitted} 项未展开；请完善 .gitignore 后刷新"
-                ));
+                lines.push(i18n::text(UiMessage::GitChangesOmitted { count: omitted }));
             }
             self.changes_label.set_label(&lines.join("\n"));
         }
@@ -254,12 +253,13 @@ impl PublishDialog {
             .set(has_managed && !has_conflict && status.behind == 0);
         if has_conflict && self.result_label.label().is_empty() {
             self.result_label
-                .set_label("存在未解决的 Git 冲突，必须先在外部解决。")
+                .set_label(&i18n::text(UiMessage::GitConflictStatus))
         } else if status.behind > 0 && self.result_label.label().is_empty() {
             self.result_label
-                .set_label("远端含有本地没有的提交；为避免制造分叉，必须先处理同步状态。")
+                .set_label(&i18n::text(UiMessage::GitBehindStatus))
         } else if !has_managed && self.result_label.label().is_empty() {
-            self.result_label.set_label("没有受管改动可提交。")
+            self.result_label
+                .set_label(&i18n::text(UiMessage::GitNoManagedChanges))
         }
         self.sync_publish_button();
     }
@@ -388,7 +388,8 @@ fn build_article_choices(
             });
             let checkbox = gtk::CheckButton::with_label(&label);
             checkbox.set_active(active);
-            checkbox.set_tooltip_text(Some(&format!("{} 个受管路径", paths.len())));
+            let tooltip = i18n::text(UiMessage::GitManagedPathCount { count: paths.len() });
+            checkbox.set_tooltip_text(Some(&tooltip));
             ArticleChoice {
                 article_id,
                 paths,
@@ -432,7 +433,8 @@ pub(super) fn show_dialog(widgets: &Widgets, state: &Rc<std::cell::RefCell<Edito
         };
         (context.clone(), state.posts.clone())
     };
-    set_busy(widgets, state, true, "正在读取 Git 状态…");
+    let status_message = i18n::text(UiMessage::GitReadingStatus);
+    set_busy(widgets, state, true, &status_message);
     let widgets = widgets.clone();
     let state = Rc::clone(state);
     tasks::run(
@@ -470,13 +472,15 @@ fn present_dialog(
         let selected_paths = callback_dialog.selected_paths();
         let remember_choices = callback_dialog.remember_choices.is_active();
         let updated_exclusions = callback_dialog.updated_exclusions(&context);
-        callback_dialog.result_label.set_label("正在暂存受管改动…");
+        callback_dialog
+            .result_label
+            .set_label(&i18n::text(UiMessage::GitStagingStatus));
         callback_dialog.set_working(true);
         set_busy(
             &callback_widgets,
             &callback_state,
             true,
-            "正在提交 Git 改动…",
+            &i18n::text(UiMessage::GitCommittingStatus),
         );
 
         let task_context = context.clone();
@@ -518,15 +522,22 @@ fn present_dialog(
                             .trace_buffer
                             .set_text(&operation_log(&result.report));
                         if result.error.is_none() {
-                            toast(&task_widgets, "Git 提交发布完成");
+                            toast(
+                                &task_widgets,
+                                &i18n::text(UiMessage::GitPublishSuccessToast),
+                            );
                         } else {
-                            show_error(&task_widgets, "Git 发布未完整完成，请查看分阶段结果");
+                            show_error(
+                                &task_widgets,
+                                &i18n::text(UiMessage::GitPublishIncompleteToast),
+                            );
                         }
                     }
                     Err(error) => {
-                        task_dialog
-                            .result_label
-                            .set_label(&format!("Git 操作失败：{error}"));
+                        task_dialog.result_label.set_label(&format!(
+                            "{}: {error}",
+                            i18n::text(UiMessage::GitOperationIncomplete)
+                        ));
                         show_error(&task_widgets, &error.to_string());
                     }
                 }
@@ -558,7 +569,10 @@ fn refresh_status(
             dialog.set_working(false);
             match result {
                 Ok(status) => dialog.apply_status(&status),
-                Err(error) => show_error(&widgets, &format!("刷新 Git 状态失败：{error}")),
+                Err(error) => show_error(
+                    &widgets,
+                    &format!("{}: {error}", i18n::text(UiMessage::GitStatusReadFailed)),
+                ),
             }
             git_panel::refresh(&widgets, &state);
         },
@@ -585,30 +599,59 @@ fn change_kind_symbol(kind: ChangeKind) -> &'static str {
     }
 }
 
+fn localized_change_line(change: &cloudstack_core::model::FileChange) -> String {
+    let path = change.old_path.as_deref().map_or_else(
+        || change.path.clone(),
+        |old_path| {
+            i18n::text(UiMessage::GitRenamedPath {
+                old_path: old_path.to_owned(),
+                path: change.path.clone(),
+            })
+        },
+    );
+    i18n::text(UiMessage::GitChangeLine {
+        marker: change_kind_symbol(change.kind).to_owned(),
+        scope: if change.managed {
+            String::new()
+        } else {
+            i18n::text(UiMessage::GitUnmanagedSuffix)
+        },
+        staged: if change.staged {
+            i18n::text(UiMessage::GitStagedSuffix)
+        } else {
+            String::new()
+        },
+        path,
+    })
+}
+
 fn publish_summary(result: &PublishResult, requested_push: bool) -> String {
     let mut lines = Vec::new();
     if result.staged {
-        lines.push(format!("暂存：{} 个受管路径", result.staged_files.len()));
+        lines.push(i18n::text(UiMessage::GitStageSummary {
+            count: result.staged_files.len(),
+        }));
     }
     if result.committed {
-        lines.push(format!(
-            "提交：{}",
-            result.commit_hash.as_deref().unwrap_or("已完成")
-        ));
+        lines.push(i18n::text(UiMessage::GitCommitSummary {
+            hash: result.commit_hash.as_deref().unwrap_or("done").to_owned(),
+        }));
     }
     if result.pushed {
-        lines.push("推送：已完成".to_string());
+        lines.push(i18n::text(UiMessage::GitPushedSummary));
     } else if !requested_push && result.committed {
-        lines.push("推送：本次未请求".to_string());
+        lines.push(i18n::text(UiMessage::GitPushNotRequestedSummary));
     }
     if let Some(stage) = &result.error_stage {
-        lines.push(format!("停止阶段：{stage}"));
+        lines.push(i18n::text(UiMessage::GitStopStage {
+            stage: stage.clone(),
+        }));
     }
     if let Some(error) = &result.error {
         lines.push(error.fallback().to_string());
     }
     if lines.is_empty() {
-        "没有执行 Git 改动。".to_string()
+        i18n::text(UiMessage::GitNoChangesExecuted)
     } else {
         lines.join("\n")
     }
@@ -633,9 +676,9 @@ mod tests {
             report: Default::default(),
         };
         let summary = publish_summary(&result, true);
-        assert!(summary.contains("暂存：1"));
-        assert!(summary.contains("提交：abc123"));
-        assert!(summary.contains("停止阶段：push"));
+        assert!(summary.contains("1"));
+        assert!(summary.contains("abc123"));
+        assert!(summary.contains("push"));
         assert!(summary.contains("推送失败"));
     }
 

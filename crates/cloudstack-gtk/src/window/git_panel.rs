@@ -62,11 +62,11 @@ impl GitPanel {
     pub(super) fn new() -> Self {
         let toggle_button = gtk::Button::builder()
             .icon_name("pan-up-symbolic")
-            .tooltip_text("展开 Git 详情")
+            .tooltip_text(i18n::text(UiMessage::GitExpandDetails))
             .css_classes(["flat"])
             .build();
         let summary_label = gtk::Label::builder()
-            .label("尚未打开项目")
+            .label(i18n::text(UiMessage::GitProjectNotOpen))
             .xalign(0.0)
             .hexpand(true)
             .ellipsize(gtk::pango::EllipsizeMode::End)
@@ -89,39 +89,39 @@ impl GitPanel {
         summary.append(&publish_button);
 
         let title = gtk::Label::builder()
-            .label("Git 详情")
+            .label(i18n::text(UiMessage::GitDetailsTitle))
             .xalign(0.0)
             .hexpand(true)
             .css_classes(["heading"])
             .build();
         let refresh_button = gtk::Button::builder()
             .icon_name("view-refresh-symbolic")
-            .tooltip_text("刷新 Git 状态")
+            .tooltip_text(i18n::text(UiMessage::GitRefreshTooltip))
             .action_name("win.refresh-git")
             .sensitive(false)
             .build();
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         header.append(&title);
 
-        let repository_label = status_label("尚未打开项目");
-        let sync_label = status_label("同步状态未知");
-        let worktree_label = status_label("工作区状态未知");
-        let remote_heading = section_heading("远端");
-        let remote_label = status_label("尚未配置远端");
+        let repository_label = status_label(&i18n::text(UiMessage::GitProjectNotOpen));
+        let sync_label = status_label(&i18n::text(UiMessage::GitSyncUnknown));
+        let worktree_label = status_label(&i18n::text(UiMessage::GitWorktreeUnknown));
+        let remote_heading = section_heading(&i18n::text(UiMessage::GitRemoteTitle));
+        let remote_label = status_label(&i18n::text(UiMessage::GitRemoteNotConfigured));
         remote_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
         remote_label.set_wrap(false);
-        let changes_title = section_heading("改动");
+        let changes_title = section_heading(&i18n::text(UiMessage::GitChangesTitle));
         let changes_list = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        set_changes_placeholder(&changes_list, "没有改动");
+        set_changes_placeholder(&changes_list, &i18n::text(UiMessage::GitNoChanges));
         let fetch_button = gtk::Button::builder()
-            .label("获取")
-            .tooltip_text("执行 git fetch --prune")
+            .label(i18n::text(UiMessage::GitFetch))
+            .tooltip_text(i18n::text(UiMessage::GitFetchTooltip))
             .action_name("win.fetch-git")
             .sensitive(false)
             .build();
         let untrack_config_button = gtk::Button::builder()
-            .label("停止跟踪配置")
-            .tooltip_text("从 Git 索引移除配置，但保留本地文件")
+            .label(i18n::text(UiMessage::GitUntrackConfig))
+            .tooltip_text(i18n::text(UiMessage::GitUntrackConfigTooltip))
             .action_name("win.untrack-config")
             .visible(false)
             .build();
@@ -229,11 +229,12 @@ impl GitPanel {
         } else {
             "pan-up-symbolic"
         });
-        self.toggle_button.set_tooltip_text(Some(if expanded {
-            "收起 Git 详情"
+        let tooltip = if expanded {
+            i18n::text(UiMessage::GitCollapseDetails)
         } else {
-            "展开 Git 详情"
-        }));
+            i18n::text(UiMessage::GitExpandDetails)
+        };
+        self.toggle_button.set_tooltip_text(Some(&tooltip));
         self.apply_split_position(expanded);
     }
 
@@ -251,28 +252,43 @@ impl GitPanel {
     }
 
     pub(super) fn set_loading(&self) {
-        self.summary_label.set_label("正在读取 Git 状态…");
-        self.repository_label.set_label("正在读取仓库状态…");
-        self.sync_label.set_label("同步状态：读取中");
-        self.worktree_label.set_label("工作区：读取中");
-        self.remote_label.set_label("读取中…");
-        self.changes_title.set_label("改动");
-        set_changes_placeholder(&self.changes_list, "读取中…");
+        self.summary_label
+            .set_label(&i18n::text(UiMessage::GitLoadingSummary));
+        self.repository_label
+            .set_label(&i18n::text(UiMessage::GitLoadingRepository));
+        self.sync_label
+            .set_label(&i18n::text(UiMessage::GitLoadingSync));
+        self.worktree_label
+            .set_label(&i18n::text(UiMessage::GitLoadingWorktree));
+        self.remote_label
+            .set_label(&i18n::text(UiMessage::GitLoadingRemote));
+        self.changes_title
+            .set_label(&i18n::text(UiMessage::GitChangesTitle));
+        set_changes_placeholder(
+            &self.changes_list,
+            &i18n::text(UiMessage::GitLoadingChanges),
+        );
         self.refresh_button.set_sensitive(false);
         self.fetch_button.set_sensitive(false);
         self.untrack_config_button.set_sensitive(false);
-        self.publish_button.set_label("读取中");
+        self.publish_button
+            .set_label(&i18n::text(UiMessage::GitLoadingChanges));
         self.publish_button.set_sensitive(false);
     }
 
     pub(super) fn apply(&self, snapshot: &RepositorySnapshot) {
         if !snapshot.environment.git_available {
-            self.summary_label.set_label("未安装 Git");
-            self.repository_label.set_label("未安装 Git");
-            self.sync_label.set_label("请先通过 pacman 安装 git");
-            self.worktree_label.set_label("工作区：未知");
-            self.remote_label.set_label("不可用");
-            set_changes_placeholder(&self.changes_list, "不可用");
+            self.summary_label
+                .set_label(&i18n::text(UiMessage::GitNotInstalled));
+            self.repository_label
+                .set_label(&i18n::text(UiMessage::GitNotInstalled));
+            self.sync_label
+                .set_label(&i18n::text(UiMessage::GitInstallHint));
+            self.worktree_label
+                .set_label(&i18n::text(UiMessage::GitWorktreeUnknown));
+            self.remote_label
+                .set_label(&i18n::text(UiMessage::GitUnavailable));
+            set_changes_placeholder(&self.changes_list, &i18n::text(UiMessage::GitUnavailable));
             self.refresh_button.set_sensitive(false);
             self.fetch_button.set_sensitive(false);
             self.untrack_config_button.set_visible(false);
@@ -280,19 +296,21 @@ impl GitPanel {
             return;
         }
         let branch = snapshot.status.branch.as_deref().unwrap_or("—");
-        let summary = summary_text(snapshot);
+        let summary = localized_summary_text(snapshot);
         self.summary_label.set_label(&summary);
         self.summary_label.set_tooltip_text(Some(&summary));
         self.repository_label
-            .set_label(&format!("{} · {branch}", topology_text(snapshot.topology)));
-        self.sync_label.set_label(&sync_text(snapshot));
+            .set_label(&localized_repository_text(snapshot, branch));
+        self.sync_label.set_label(&localized_sync_text(snapshot));
         self.worktree_label
-            .set_label(&worktree_text(snapshot.worktree));
-        self.remote_label.set_label(&remote_text(snapshot));
-        self.remote_label
-            .set_tooltip_text(Some(&remote_text(snapshot)));
+            .set_label(&localized_worktree_text(snapshot.worktree));
+        let remote = localized_remote_text(snapshot);
+        self.remote_label.set_label(&remote);
+        self.remote_label.set_tooltip_text(Some(&remote));
         self.changes_title
-            .set_label(&format!("改动 · {}", snapshot.status.changes.len()));
+            .set_label(&i18n::text(UiMessage::GitChangesCount {
+                count: snapshot.status.changes.len(),
+            }));
         populate_changes(&self.changes_list, snapshot);
         self.refresh_button
             .set_sensitive(snapshot.environment.git_available);
@@ -306,12 +324,16 @@ impl GitPanel {
     }
 
     pub(super) fn set_error(&self, message: &str) {
-        self.summary_label.set_label("Git 状态读取失败");
-        self.repository_label.set_label("Git 状态读取失败");
+        self.summary_label
+            .set_label(&i18n::text(UiMessage::GitStatusReadFailed));
+        self.repository_label
+            .set_label(&i18n::text(UiMessage::GitStatusReadFailed));
         self.sync_label.set_label(message);
-        self.worktree_label.set_label("工作区：未知");
-        self.remote_label.set_label("未知");
-        set_changes_placeholder(&self.changes_list, "未知");
+        self.worktree_label
+            .set_label(&i18n::text(UiMessage::GitWorktreeUnknown));
+        self.remote_label
+            .set_label(&i18n::text(UiMessage::GitUnknown));
+        set_changes_placeholder(&self.changes_list, &i18n::text(UiMessage::GitUnknown));
         self.refresh_button.set_sensitive(true);
         self.fetch_button.set_sensitive(false);
         self.untrack_config_button.set_visible(false);
@@ -321,13 +343,19 @@ impl GitPanel {
     pub(super) fn set_project_available(&self, available: bool) {
         if !available {
             self.refresh_button.set_sensitive(false);
-            self.repository_label.set_label("尚未打开项目");
-            self.summary_label.set_label("尚未打开项目");
-            self.sync_label.set_label("同步状态未知");
-            self.worktree_label.set_label("工作区状态未知");
-            self.remote_label.set_label("尚未配置远端");
-            self.changes_title.set_label("改动");
-            set_changes_placeholder(&self.changes_list, "没有改动");
+            self.repository_label
+                .set_label(&i18n::text(UiMessage::GitProjectNotOpen));
+            self.summary_label
+                .set_label(&i18n::text(UiMessage::GitProjectNotOpen));
+            self.sync_label
+                .set_label(&i18n::text(UiMessage::GitSyncUnknown));
+            self.worktree_label
+                .set_label(&i18n::text(UiMessage::GitWorktreeUnknown));
+            self.remote_label
+                .set_label(&i18n::text(UiMessage::GitRemoteNotConfigured));
+            self.changes_title
+                .set_label(&i18n::text(UiMessage::GitChangesTitle));
+            set_changes_placeholder(&self.changes_list, &i18n::text(UiMessage::GitNoChanges));
             self.fetch_button.set_sensitive(false);
             self.untrack_config_button.set_visible(false);
             self.set_primary_action(EffectivePrimaryAction::None);
@@ -335,14 +363,17 @@ impl GitPanel {
     }
 
     pub(super) fn reflect_unsaved_editor(&self, dirty: bool) {
+        let prefix = i18n::text(UiMessage::GitUnsavedPrefix);
+        let prefix_with_separator = format!("{prefix} · ");
         if dirty {
             let current = self.summary_label.text();
-            if !current.starts_with("未保存 · ") {
-                self.summary_label.set_label(&format!("未保存 · {current}"));
+            if !current.starts_with(&prefix_with_separator) {
+                self.summary_label
+                    .set_label(&format!("{prefix_with_separator}{current}"));
             }
         } else {
             let current = self.summary_label.text();
-            if let Some(current) = current.strip_prefix("未保存 · ") {
+            if let Some(current) = current.strip_prefix(&prefix_with_separator) {
                 self.summary_label.set_label(current);
             }
         }
@@ -391,9 +422,9 @@ pub(super) fn untrack_config(widgets: &Widgets, state: &Rc<RefCell<EditorState>>
     confirm_operation(
         widgets,
         state,
-        "停止跟踪 CloudStack 配置？",
-        "本地配置会从 Git 索引移除，并单独创建一个本地提交；文件本身会保留并加入此仓库的本地 exclude，不会自动推送。",
-        "停止跟踪",
+        &i18n::text(UiMessage::GitUntrackHeading),
+        &i18n::text(UiMessage::GitUntrackBody),
+        &i18n::text(UiMessage::GitUntrackAction),
         Completion::Refresh,
         |context| git::stop_tracking_project_config(&context),
     );
@@ -532,6 +563,7 @@ fn section_heading(text: &str) -> gtk::Label {
         .build()
 }
 
+#[cfg(test)]
 fn summary_text(snapshot: &RepositorySnapshot) -> String {
     let branch = snapshot.status.branch.as_deref().unwrap_or("—");
     let destination = snapshot.status.upstream.as_deref().map_or_else(
@@ -548,16 +580,59 @@ fn summary_text(snapshot: &RepositorySnapshot) -> String {
     }
 }
 
-fn remote_text(snapshot: &RepositorySnapshot) -> String {
+fn localized_summary_text(snapshot: &RepositorySnapshot) -> String {
+    let branch = snapshot.status.branch.as_deref().unwrap_or("—");
+    let destination = snapshot.status.upstream.as_deref().map_or_else(
+        || branch.to_owned(),
+        |upstream| format!("{branch} → {upstream}"),
+    );
+    let count = snapshot.status.changes.len();
+    match snapshot.topology {
+        RepositoryTopology::NotInitialized => {
+            i18n::text(UiMessage::GitSummaryNotInitialized { count })
+        }
+        RepositoryTopology::ParentRepository => i18n::text(UiMessage::GitSummaryParentRepository),
+        RepositoryTopology::Detached => i18n::text(UiMessage::GitSummaryDetached { count }),
+        _ if count == 0 => i18n::text(UiMessage::GitSummaryClean { destination }),
+        _ => i18n::text(UiMessage::GitSummaryChanges { destination, count }),
+    }
+}
+
+fn localized_repository_text(snapshot: &RepositorySnapshot, branch: &str) -> String {
+    i18n::text(UiMessage::GitRepositoryStatus {
+        topology: localized_topology_text(snapshot.topology),
+        branch: branch.to_owned(),
+    })
+}
+
+fn localized_topology_text(topology: RepositoryTopology) -> String {
+    let message = match topology {
+        RepositoryTopology::NotInitialized => UiMessage::GitTopologyNotInitialized,
+        RepositoryTopology::ParentRepository => UiMessage::GitTopologyParentRepository,
+        RepositoryTopology::NoCommit => UiMessage::GitTopologyNoCommit,
+        RepositoryTopology::NoRemote => UiMessage::GitTopologyNoRemote,
+        RepositoryTopology::NoUpstream => UiMessage::GitTopologyNoUpstream,
+        RepositoryTopology::Tracking => UiMessage::GitTopologyTracking,
+        RepositoryTopology::Detached => UiMessage::GitBranchDetached,
+    };
+    i18n::text(message)
+}
+
+fn localized_remote_text(snapshot: &RepositorySnapshot) -> String {
     if snapshot.remotes.is_empty() {
-        return "尚未配置远端".to_string();
+        return i18n::text(UiMessage::GitRemoteNotConfigured);
     }
     snapshot
         .remotes
         .iter()
         .map(|remote| match &remote.url {
-            Some(url) => format!("{}  {url}", remote.name),
-            None => remote.name.clone(),
+            Some(url) => i18n::text(UiMessage::GitRemoteEntry {
+                name: remote.name.clone(),
+                url: url.clone(),
+            }),
+            None => i18n::text(UiMessage::GitRemoteName {
+                name: remote.name.clone(),
+            }),
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -580,7 +655,7 @@ fn changes_text(snapshot: &RepositorySnapshot) -> String {
 fn populate_changes(list: &gtk::Box, snapshot: &RepositorySnapshot) {
     clear_box(list);
     if snapshot.status.changes.is_empty() {
-        list.append(&status_label("没有改动"));
+        list.append(&status_label(&i18n::text(UiMessage::GitNoChanges)));
         return;
     }
     let displayed = prioritized_changes(&snapshot.status.changes);
@@ -592,12 +667,12 @@ fn populate_changes(list: &gtk::Box, snapshot: &RepositorySnapshot) {
             .css_classes(["caption-heading", "accent"])
             .build();
         let path = gtk::Label::builder()
-            .label(change_path(change))
+            .label(localized_change_path_details(change))
             .xalign(0.0)
             .hexpand(true)
             .ellipsize(gtk::pango::EllipsizeMode::Middle)
             .single_line_mode(true)
-            .tooltip_text(change_text(change))
+            .tooltip_text(localized_change_path_details(change))
             .css_classes(if change.managed {
                 ["monospace", "caption"]
             } else {
@@ -615,9 +690,9 @@ fn populate_changes(list: &gtk::Box, snapshot: &RepositorySnapshot) {
         .len()
         .saturating_sub(displayed.len());
     if omitted > 0 {
-        list.append(&status_label(&format!(
-            "还有 {omitted} 项未展开；请完善 .gitignore 后刷新"
-        )));
+        list.append(&status_label(&i18n::text(UiMessage::GitChangesOmitted {
+            count: omitted,
+        })));
     }
 }
 
@@ -652,6 +727,7 @@ fn change_marker(kind: ChangeKind) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn change_path(change: &FileChange) -> String {
     let path = change.old_path.as_deref().map_or_else(
         || change.path.clone(),
@@ -662,35 +738,57 @@ fn change_path(change: &FileChange) -> String {
     format!("{path}{scope}{staged}")
 }
 
+fn localized_change_path(change: &FileChange) -> String {
+    change.old_path.as_deref().map_or_else(
+        || change.path.clone(),
+        |old_path| {
+            i18n::text(UiMessage::GitRenamedPath {
+                old_path: old_path.to_owned(),
+                path: change.path.clone(),
+            })
+        },
+    )
+}
+
+fn localized_change_path_details(change: &FileChange) -> String {
+    i18n::text(UiMessage::GitChangePath {
+        scope: if change.managed {
+            String::new()
+        } else {
+            i18n::text(UiMessage::GitUnmanagedSuffix)
+        },
+        staged: if change.staged {
+            i18n::text(UiMessage::GitStagedSuffix)
+        } else {
+            String::new()
+        },
+        path: localized_change_path(change),
+    })
+}
+
+#[cfg(test)]
 fn change_text(change: &FileChange) -> String {
     format!("{}  {}", change_marker(change.kind), change_path(change))
 }
 
-fn topology_text(topology: RepositoryTopology) -> &'static str {
-    match topology {
-        RepositoryTopology::NotInitialized => "未初始化",
-        RepositoryTopology::ParentRepository => "仅父目录有仓库",
-        RepositoryTopology::NoCommit => "尚无提交",
-        RepositoryTopology::NoRemote => "没有远端",
-        RepositoryTopology::NoUpstream => "没有 upstream",
-        RepositoryTopology::Tracking => "已跟踪",
-        RepositoryTopology::Detached => "分离 HEAD",
-    }
-}
-
-fn sync_text(snapshot: &RepositorySnapshot) -> String {
+fn localized_sync_text(snapshot: &RepositorySnapshot) -> String {
     match snapshot.sync {
-        SyncRelation::Unknown => "同步：尚不可比较".to_string(),
-        SyncRelation::Synced => "同步：与远端一致".to_string(),
-        SyncRelation::Ahead => format!("同步：领先 {} 个提交", snapshot.status.ahead),
-        SyncRelation::Behind => format!("同步：落后 {} 个提交", snapshot.status.behind),
-        SyncRelation::Diverged => format!(
-            "同步：已分叉（领先 {} / 落后 {}）",
-            snapshot.status.ahead, snapshot.status.behind
-        ),
+        SyncRelation::Unknown => i18n::text(UiMessage::GitSyncUnknown),
+        SyncRelation::Synced => i18n::text(UiMessage::GitSyncSynced),
+        SyncRelation::Ahead => i18n::text(UiMessage::GitSyncAhead {
+            count: snapshot.status.ahead,
+        }),
+        SyncRelation::Behind => i18n::text(UiMessage::GitSyncBehind {
+            count: snapshot.status.behind,
+        }),
+        SyncRelation::Diverged => i18n::text(UiMessage::GitSyncDiverged {
+            ahead: snapshot.status.ahead,
+            behind: snapshot.status.behind,
+        }),
     }
 }
 
+#[cfg(test)]
 fn worktree_text(worktree: WorktreeState) -> String {
     if worktree.has_conflicts {
         return "工作区：存在未解决冲突".to_string();
@@ -707,6 +805,27 @@ fn worktree_text(worktree: WorktreeState) -> String {
         "工作区：受管 {} / 其他 {}{staged}",
         worktree.managed_changes, worktree.unmanaged_changes
     )
+}
+
+fn localized_worktree_text(worktree: WorktreeState) -> String {
+    if worktree.has_conflicts {
+        return i18n::text(UiMessage::GitWorktreeConflict);
+    }
+    if worktree.is_clean() {
+        return i18n::text(UiMessage::GitWorktreeClean);
+    }
+    if worktree.staged_changes > 0 {
+        i18n::text(UiMessage::GitWorktreeChanges {
+            managed: worktree.managed_changes,
+            unmanaged: worktree.unmanaged_changes,
+            staged: worktree.staged_changes,
+        })
+    } else {
+        i18n::text(UiMessage::GitWorktreeChangesNoStaged {
+            managed: worktree.managed_changes,
+            unmanaged: worktree.unmanaged_changes,
+        })
+    }
 }
 
 pub(super) fn activate_primary(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
@@ -738,9 +857,9 @@ pub(super) fn activate_primary(widgets: &Widgets, state: &Rc<RefCell<EditorState
                 PrimaryAction::Initialize => confirm_operation(
                     widgets,
                     state,
-                    "初始化 Git 仓库？",
-                    "将在项目根目录执行 git init -b main，不会暂存或提交任何文件。",
-                    "初始化",
+                    &i18n::text(UiMessage::GitInitHeading),
+                    &i18n::text(UiMessage::GitInitBody),
+                    &i18n::text(UiMessage::GitInitAction),
                     Completion::Refresh,
                     |context| git::initialize(&context),
                 ),
@@ -753,34 +872,34 @@ pub(super) fn activate_primary(widgets: &Widgets, state: &Rc<RefCell<EditorState
                     )
                     .is_err()
                     {
-                        show_error(widgets, "无法打开提交窗口");
+                        show_error(widgets, &i18n::text(UiMessage::GitOpenPublishFailed));
                     }
                 }
                 PrimaryAction::ConfigureRemote => show_remote_dialog(widgets, state, &snapshot),
                 PrimaryAction::PushUpstream => confirm_operation(
                     widgets,
                     state,
-                    "首次推送到 origin？",
-                    "将执行 git push --set-upstream origin <当前分支>。",
-                    "推送",
+                    &i18n::text(UiMessage::GitPushUpstreamHeading),
+                    &i18n::text(UiMessage::GitPushUpstreamBody),
+                    &i18n::text(UiMessage::GitPushAction),
                     Completion::Refresh,
                     |context| git::push_upstream(&context),
                 ),
                 PrimaryAction::Push => confirm_operation(
                     widgets,
                     state,
-                    "推送本地提交？",
-                    "只会推送当前分支已有的本地提交，不会自动合并或改写历史。",
-                    "推送",
+                    &i18n::text(UiMessage::GitPushHeading),
+                    &i18n::text(UiMessage::GitPushBody),
+                    &i18n::text(UiMessage::GitPushAction),
                     Completion::Refresh,
                     |context| git::push(&context),
                 ),
                 PrimaryAction::PullFastForward => confirm_operation(
                     widgets,
                     state,
-                    "快进同步远端更新？",
-                    "仅执行 git pull --ff-only。若不能纯快进，将保持原状并停止。",
-                    "同步",
+                    &i18n::text(UiMessage::GitPullHeading),
+                    &i18n::text(UiMessage::GitPullBody),
+                    &i18n::text(UiMessage::GitPullAction),
                     Completion::ReloadProject,
                     |context| git::pull_fast_forward(&context),
                 ),
@@ -790,17 +909,19 @@ pub(super) fn activate_primary(widgets: &Widgets, state: &Rc<RefCell<EditorState
 }
 
 fn show_identity_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
-    let name_entry = gtk::Entry::builder().placeholder_text("Git 用户名").build();
+    let name_entry = gtk::Entry::builder()
+        .placeholder_text(i18n::text(UiMessage::GitIdentityPlaceholder))
+        .build();
     let email_entry = gtk::Entry::builder()
         .placeholder_text("name@example.com")
         .build();
     let save_button = gtk::Button::builder()
-        .label("保存到当前仓库")
+        .label(i18n::text(UiMessage::GitIdentitySave))
         .css_classes(["suggested-action"])
         .sensitive(false)
         .build();
     let note = gtk::Label::builder()
-        .label("只写入当前项目的 .git/config，不修改全局 Git 身份。")
+        .label(i18n::text(UiMessage::GitIdentityNote))
         .xalign(0.0)
         .wrap(true)
         .css_classes(["dim-label"])
@@ -815,12 +936,13 @@ fn show_identity_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     content.append(&email_entry);
     content.append(&save_button);
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&gtk::Label::new(Some("配置 Git 提交身份"))));
+    let title = i18n::text(UiMessage::GitIdentityTitle);
+    header.set_title_widget(Some(&gtk::Label::new(Some(&title))));
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&content));
     let dialog = adw::Dialog::builder()
-        .title("配置 Git 提交身份")
+        .title(i18n::text(UiMessage::GitIdentityTitle))
         .content_width(520)
         .content_height(300)
         .child(&toolbar)
@@ -851,10 +973,11 @@ fn show_identity_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
         let name = save_name.text().trim().to_owned();
         let email = save_email.text().trim().to_owned();
         save_dialog.close();
+        let heading = i18n::text(UiMessage::GitIdentityTitle);
         execute_operation(
             &save_widgets,
             &save_state,
-            "配置 Git 提交身份",
+            &heading,
             Completion::Refresh,
             move |context| git::configure_identity(&context, &name, &email),
         );
@@ -867,13 +990,10 @@ pub(super) fn fetch_remote(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) 
     if state.borrow().busy {
         return;
     }
-    execute_operation(
-        widgets,
-        state,
-        "获取远端状态",
-        Completion::Refresh,
-        |context| git::fetch(&context),
-    );
+    let heading = i18n::text(UiMessage::GitFetchOperation);
+    execute_operation(widgets, state, &heading, Completion::Refresh, |context| {
+        git::fetch(&context)
+    });
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -903,7 +1023,8 @@ fn confirm_operation<Work>(
         .default_response("confirm")
         .close_response("cancel")
         .build();
-    dialog.add_responses(&[("cancel", "取消"), ("confirm", action_label)]);
+    let cancel = i18n::text(UiMessage::Cancel);
+    dialog.add_responses(&[("cancel", cancel.as_str()), ("confirm", action_label)]);
     dialog.set_response_appearance("confirm", adw::ResponseAppearance::Suggested);
     let parent = widgets.window.clone();
     let widgets = widgets.clone();
@@ -961,21 +1082,30 @@ fn execute_operation<Work>(
                         .trace_buffer
                         .set_text(&operation_log(&result.report));
                     if let Some(error) = result.error {
-                        callback_dialog
-                            .result_label
-                            .set_label(&format!("操作停止：{error}"));
-                        show_error(&widgets, "Git 操作未完成，请查看执行记录");
+                        callback_dialog.result_label.set_label(&format!(
+                            "{}：{error}",
+                            i18n::text(UiMessage::GitStopStage {
+                                stage: "operation".into()
+                            })
+                        ));
+                        show_error(&widgets, &i18n::text(UiMessage::GitOperationIncomplete));
                     } else {
-                        callback_dialog.result_label.set_label("操作已完成");
-                        toast(&widgets, "Git 操作已完成");
+                        let done = i18n::text(UiMessage::GitOperationDone);
+                        callback_dialog.result_label.set_label(&done);
+                        toast(&widgets, &done);
                         succeeded = true;
                     }
                 }
                 Err(error) => {
+                    callback_dialog.result_label.set_label(&format!(
+                        "{}：{error}",
+                        i18n::text(UiMessage::GitStopStage {
+                            stage: "before command".into(),
+                        })
+                    ));
                     callback_dialog
-                        .result_label
-                        .set_label(&format!("命令执行前已停止：{error}"));
-                    callback_dialog.trace_buffer.set_text("没有执行外部命令。");
+                        .trace_buffer
+                        .set_text(&i18n::text(UiMessage::GitNoExternalCommand));
                     show_error(&widgets, &error.to_string());
                 }
             }
@@ -1002,7 +1132,7 @@ impl OperationDialog {
         let spinner = gtk::Spinner::new();
         spinner.start();
         let result_label = gtk::Label::builder()
-            .label("正在执行…")
+            .label(i18n::text(UiMessage::GitOperationExecuting))
             .xalign(0.0)
             .wrap(true)
             .build();
@@ -1067,20 +1197,20 @@ fn show_remote_dialog(
         return;
     };
     let url_entry = gtk::Entry::builder()
-        .placeholder_text("git@github.com:user/repository.git")
+        .placeholder_text(i18n::text(UiMessage::GitRemoteUrlPlaceholder))
         .build();
     let setup_credentials =
-        gtk::CheckButton::with_label("为 github.com 配置 gh 凭据助手（修改全局 Git 配置）");
+        gtk::CheckButton::with_label(&i18n::text(UiMessage::GitGhCredentialOption));
     setup_credentials.set_sensitive(snapshot.environment.gh_authenticated);
     let add_button = gtk::Button::builder()
-        .label("添加 origin")
+        .label(i18n::text(UiMessage::GitAddOrigin))
         .css_classes(["suggested-action"])
         .sensitive(false)
         .build();
     let url_group = gtk::Box::new(gtk::Orientation::Vertical, 8);
     url_group.append(
         &gtk::Label::builder()
-            .label("使用现有远端")
+            .label(i18n::text(UiMessage::GitExistingRemote))
             .xalign(0.0)
             .css_classes(["heading"])
             .build(),
@@ -1096,26 +1226,26 @@ fn show_remote_dialog(
         .unwrap_or("cloudstack-notes");
     let repo_entry = gtk::Entry::builder()
         .text(default_name)
-        .placeholder_text("repository 或 owner/repository")
+        .placeholder_text(i18n::text(UiMessage::GitRepositoryNamePlaceholder))
         .build();
-    let private_check = gtk::CheckButton::with_label("创建为私有仓库");
+    let private_check = gtk::CheckButton::with_label(&i18n::text(UiMessage::GitPrivateRepository));
     private_check.set_active(true);
     let create_button = gtk::Button::builder()
-        .label("在 GitHub 创建并推送")
+        .label(i18n::text(UiMessage::GitCreateAndPush))
         .sensitive(snapshot.environment.gh_authenticated)
         .build();
     let gh_status = if !snapshot.environment.gh_available {
-        "未检测到 gh，请先安装 github-cli。"
+        i18n::text(UiMessage::GitGhMissing)
     } else if !snapshot.environment.gh_authenticated {
-        "gh 尚未登录，请先在终端执行 gh auth login。"
+        i18n::text(UiMessage::GitGhNotAuthenticated)
     } else {
-        "将调用 gh repo create；失败时保留已经完成的远端状态，不自动删除仓库。"
+        i18n::text(UiMessage::GitGhCreateNote)
     };
     let github_group = gtk::Box::new(gtk::Orientation::Vertical, 8);
     github_group.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     github_group.append(
         &gtk::Label::builder()
-            .label("创建 GitHub 仓库")
+            .label(i18n::text(UiMessage::GitCreateGithubTitle))
             .xalign(0.0)
             .css_classes(["heading"])
             .build(),
@@ -1140,12 +1270,13 @@ fn show_remote_dialog(
     content.append(&url_group);
     content.append(&github_group);
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&gtk::Label::new(Some("配置 Git 远端"))));
+    let title = i18n::text(UiMessage::GitRemoteConfigTitle);
+    header.set_title_widget(Some(&gtk::Label::new(Some(&title))));
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&content));
     let dialog = adw::Dialog::builder()
-        .title("配置 Git 远端")
+        .title(title)
         .content_width(620)
         .content_height(520)
         .child(&toolbar)
@@ -1165,10 +1296,11 @@ fn show_remote_dialog(
         let url = add_url.text().trim().to_owned();
         let setup = add_setup.is_active();
         add_dialog.close();
+        let heading = i18n::text(UiMessage::GitConfigureOriginOperation);
         execute_operation(
             &add_widgets,
             &add_state,
-            "配置 origin",
+            &heading,
             Completion::Refresh,
             move |context| {
                 let mut result = git::add_origin(&context, &url)?;
@@ -1197,10 +1329,11 @@ fn show_remote_dialog(
             RepositoryVisibility::Public
         };
         create_dialog.close();
+        let heading = i18n::text(UiMessage::GitCreateGithubOperation);
         execute_operation(
             &create_widgets,
             &create_state,
-            "创建 GitHub 仓库",
+            &heading,
             Completion::Refresh,
             move |context| git::create_github_repository(&context, &name, visibility),
         );
@@ -1211,7 +1344,7 @@ fn show_remote_dialog(
 
 pub(super) fn operation_log(report: &OperationReport) -> String {
     if report.traces.is_empty() {
-        return "尚未执行外部命令。".to_string();
+        return i18n::text(UiMessage::GitNoExternalCommand);
     }
     report
         .traces
@@ -1267,7 +1400,10 @@ pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
                 Err(error) => {
                     widgets.git_panel.set_error(&error.to_string());
                     super::sync_controls(&widgets, &state);
-                    show_error(&widgets, &format!("刷新 Git 状态失败：{error}"));
+                    show_error(
+                        &widgets,
+                        &format!("{}: {error}", i18n::text(UiMessage::GitStatusReadFailed)),
+                    );
                 }
             }
         },
