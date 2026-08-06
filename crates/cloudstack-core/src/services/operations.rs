@@ -24,6 +24,10 @@
 //! 当前的 `ProjectContext` 重新推导 asset 目录（重新走一遍 `resolve_post_path`
 //! 里的路径守卫），把 journal 当成不可信的持久化输入：文件损坏、跨版本升级、
 //! 用户手动编辑，都不应该让恢复逻辑直接对着 journal 里存的任意路径操作。
+//! `asset_dir_for_post` 本身只做路径拼接、不校验结果，所以恢复逻辑用
+//! `validate_asset_directory` 在使用它的返回值之前再补一层校验——防止资产
+//! 目录这一级本身在崩溃后被换成指向项目外的符号链接，把图片移动到项目边界
+//! 之外。
 //!
 //! 之所以选择"继续做完"而不是"回滚"：回滚需要能撤销已经发生的文件系统改动，
 //! 但如果连正常回滚都会失败（`rename_post` 里已经有这种情况——见
@@ -187,6 +191,16 @@ enum MoveRecoveryState {
     Completed,
 }
 
+/// `NotFound` 才是"不存在"；权限错误等其他 IO 错误必须原样上抛，不能被静默
+/// 当成"不存在"参与状态判断（那会让一个本来该中止的恢复被错误地继续下去）。
+fn metadata_if_exists(path: &Path) -> Result<Option<fs::Metadata>, AppError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// 用 `symlink_metadata` 而不是 `exists()`，避免符号链接/断链符号链接被误判成
 /// 普通文件。只有两种状态可以安全判断该怎么做；其余一律报错——双方都存在是
 /// 冲突（不知道该信哪一个），双方都不存在是缺失（这一步的输入凭空消失了），
@@ -197,8 +211,8 @@ fn classify_move_state(
     target: &Path,
     kind: &str,
 ) -> Result<MoveRecoveryState, AppError> {
-    let source_meta = fs::symlink_metadata(source).ok();
-    let target_meta = fs::symlink_metadata(target).ok();
+    let source_meta = metadata_if_exists(source)?;
+    let target_meta = metadata_if_exists(target)?;
     let is_plain_file = |meta: &Option<fs::Metadata>| {
         meta.as_ref()
             .is_some_and(|m| m.is_file() && !m.file_type().is_symlink())
@@ -213,6 +227,36 @@ fn classify_move_state(
             target.display()
         ))),
     }
+}
+
+/// 校验资产目录本身没有通过符号链接逃出 `content_root`——跟 `path_guard::
+/// resolve_post_path` 对文章路径的校验是同一个思路，只是这里校验的是目录：
+/// 已存在必须是非符号链接的普通目录、canonical 路径在 content_root 下；
+/// 不存在则向上找最深已存在祖先做同样的校验，防止后续 `create_dir_all` 顺着
+/// 祖先符号链接在项目外建目录。`asset_dir_for_post` 本身只做路径拼接，不做
+/// 这层校验，所以恢复逻辑必须在使用它的返回值之前自己补上。
+fn validate_asset_directory(ctx: &ProjectContext, dir: &Path) -> Result<(), AppError> {
+    let invalid = || AppError::Io(format!("资产目录路径不安全，已中止恢复：{}", dir.display()));
+    match metadata_if_exists(dir)? {
+        Some(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(invalid());
+            }
+            if !dir.canonicalize()?.starts_with(&ctx.content_root) {
+                return Err(invalid());
+            }
+        }
+        None => {
+            let mut ancestor = dir.parent().ok_or_else(invalid)?;
+            while !ancestor.exists() {
+                ancestor = ancestor.parent().ok_or_else(invalid)?;
+            }
+            if !ancestor.canonicalize()?.starts_with(&ctx.content_root) {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_bare_file_name(name: &str) -> Result<(), AppError> {
@@ -239,6 +283,8 @@ fn apply_rename_recovery(
 ) -> Result<(), AppError> {
     let old_asset_dir = asset_dir_for_post(ctx, &operation.old_id)?;
     let new_asset_dir = asset_dir_for_post(ctx, &operation.new_id)?;
+    validate_asset_directory(ctx, &old_asset_dir)?;
+    validate_asset_directory(ctx, &new_asset_dir)?;
 
     let mut asset_moves = Vec::with_capacity(operation.asset_names.len());
     for name in &operation.asset_names {
@@ -646,5 +692,80 @@ mod tests {
         let recovered = recover_pending_renames(app_data.path(), &ctx);
         assert!(recovered.is_empty());
         assert!(journal.is_file());
+    }
+
+    #[test]
+    fn recover_rejects_symlinked_new_asset_directory() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let root = project_dir.path().canonicalize().unwrap();
+        let ctx = ctx_in(&root);
+        make_post(
+            &ctx,
+            "hello.md",
+            "---\ntitle: x\n---\n![](hello/cover.png)\n",
+        );
+        fs::create_dir_all(ctx.content_root.join("hello")).unwrap();
+        fs::write(ctx.content_root.join("hello/cover.png"), b"secret").unwrap();
+
+        let asset_moves = vec![(
+            ctx.content_root.join("hello/cover.png"),
+            ctx.content_root.join("world/cover.png"),
+        )];
+        let journal =
+            write_rename_journal(app_data.path(), &ctx, "hello.md", "world.md", &asset_moves)
+                .unwrap();
+
+        // "world" 资产目录被替换成了指向项目外的符号链接。
+        let outside = outside_dir.path().canonicalize().unwrap();
+        std::os::unix::fs::symlink(&outside, ctx.content_root.join("world")).unwrap();
+
+        let recovered = recover_pending_renames(app_data.path(), &ctx);
+        assert!(recovered.is_empty());
+        assert!(
+            journal.is_file(),
+            "符号链接资产目录必须中止恢复、保留 journal"
+        );
+        assert!(
+            !outside.join("cover.png").exists(),
+            "不应该把图片移出项目边界"
+        );
+        assert!(
+            ctx.content_root.join("hello/cover.png").is_file(),
+            "source 图片不应该被移动"
+        );
+    }
+
+    #[test]
+    fn recover_rejects_symlinked_old_asset_directory() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let root = project_dir.path().canonicalize().unwrap();
+        let ctx = ctx_in(&root);
+        make_post(&ctx, "hello.md", "---\ntitle: x\n---\nbody\n");
+
+        let asset_moves = vec![(
+            ctx.content_root.join("hello/cover.png"),
+            ctx.content_root.join("world/cover.png"),
+        )];
+        let journal =
+            write_rename_journal(app_data.path(), &ctx, "hello.md", "world.md", &asset_moves)
+                .unwrap();
+
+        // "hello" 资产目录被替换成了指向项目外的符号链接，外面藏着一个同名文件。
+        let outside = outside_dir.path().canonicalize().unwrap();
+        fs::write(outside.join("cover.png"), b"attacker file").unwrap();
+        std::os::unix::fs::symlink(&outside, ctx.content_root.join("hello")).unwrap();
+
+        let recovered = recover_pending_renames(app_data.path(), &ctx);
+        assert!(recovered.is_empty());
+        assert!(journal.is_file());
+        assert!(
+            outside.join("cover.png").is_file(),
+            "项目外的文件不应该被移动"
+        );
+        assert!(!ctx.content_root.join("world/cover.png").exists());
     }
 }

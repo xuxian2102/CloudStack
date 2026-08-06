@@ -29,6 +29,11 @@
   - `read_rename_journal` 原来是整体 `fs::read` 后再检查 256 KiB 上限，改成 `Read::take` 有界读取，和图片那边的有界读取原则保持一致。
   - **有意不做的部分**：journal 自身的写入是 fsync 过的原子替换，但 `fs::rename` 之后没有对受影响目录逐一 `fsync`，journal 删除后也没有再同步 `operations/` 目录本身——当前只保证"应用进程被杀掉"这一档的崩溃安全（process crash safety），不是内核崩溃/断电也不丢状态的 power-loss safety。真要做到后者，需要在每次目录项变更后都跟一次目录 fsync（journal → fsync operations/ → 资产 rename → fsync 各自 parent → 文章 rename → fsync 各自 parent → 重写正文并 fsync → 删 journal → 再 fsync operations/），这会给每次重命名操作增加好几次额外的 fsync 开销。对桌面博客编辑器来说进程被杀比断电/内核崩溃常见得多，这个取舍是有意的，不是遗漏；`operations.rs` 顶部模块注释里也写明了这个范围边界。
 
+  **第三轮后续修复（针对上一轮修复的再评审）**：
+  - `asset_dir_for_post` 只做路径拼接（`content_root.join(post_stem_path(post_id))`），不校验结果——恢复逻辑重新推导出 `old_asset_dir`/`new_asset_dir` 后如果不加校验就直接用，资产目录这一级本身如果在崩溃后被换成指向项目外的符号链接（比如 `world -> /tmp/outside`），图片就可能被移出项目边界。新增 `validate_asset_directory`：已存在必须是非符号链接的普通目录且 canonical 路径在 `content_root` 下；不存在则向上找最深已存在祖先做同样校验（防止后续 `create_dir_all` 顺着祖先符号链接在项目外建目录）。在 `apply_rename_recovery` 里对 `old_asset_dir`/`new_asset_dir` 都调用，在做任何分类/移动之前。
+  - `classify_move_state` 原来用 `fs::symlink_metadata(path).ok()` 把所有错误（包括权限错误）都当成"不存在"。改成 `metadata_if_exists` helper，只有 `ErrorKind::NotFound` 才转成 `None`，其他 IO 错误原样上抛、中止恢复。
+  - 新增 2 个测试：`recover_rejects_symlinked_old_asset_directory`、`recover_rejects_symlinked_new_asset_directory`。
+
 ## P2（代码质量与长期可维护性，不紧急）
 
 - [ ] **层内模块继续变大**：`git.rs`（72K）、`posts.rs`/`assets.rs`（各 40K）体量已大；`window.rs`（72K）虽已拆出 `window/{articles,frontmatter,publish,git_panel,drafts,recent,settings,welcome}.rs` 等子模块，但 `window.rs` 本体和 `git_panel.rs`（1716 行）、`drafts.rs`（1047 行）仍偏大，可按职责继续下沉（如 `services/git/{command,status,scope,publish,remote}.rs`）。
