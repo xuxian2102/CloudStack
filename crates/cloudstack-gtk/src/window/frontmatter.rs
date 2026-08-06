@@ -7,6 +7,7 @@ use cloudstack_core::model::FieldSpec;
 use cloudstack_core::services::frontmatter::{self as frontmatter_service, FieldValue};
 
 use super::{mark_document_dirty, EditorState, Widgets};
+use crate::i18n::{self, UiMessage};
 
 pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     while let Some(child) = widgets.frontmatter_panel.first_child() {
@@ -14,7 +15,7 @@ pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     }
 
     let title = gtk::Label::builder()
-        .label("Frontmatter")
+        .label(i18n::text(UiMessage::FrontmatterTitle))
         .xalign(0.0)
         .css_classes(["title-3"])
         .build();
@@ -23,7 +24,7 @@ pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     let (fields, post_id, raw_frontmatter) = {
         let state = state.borrow();
         let (Some(project), Some(document)) = (&state.project, &state.document) else {
-            append_hint(widgets, "打开文章后可在这里编辑元数据。");
+            append_hint(widgets, &i18n::text(UiMessage::FrontmatterOpenHint));
             return;
         };
         (
@@ -34,12 +35,9 @@ pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     };
 
     let Some(raw_frontmatter) = raw_frontmatter else {
-        append_hint(
-            widgets,
-            "这篇文章没有 Frontmatter，可以像普通 Markdown 文件一样编辑。",
-        );
+        append_hint(widgets, &i18n::text(UiMessage::NoFrontmatterHint));
         let add_button = gtk::Button::builder()
-            .label("添加 Frontmatter")
+            .label(i18n::text(UiMessage::AddFrontmatter))
             .css_classes(["suggested-action"])
             .halign(gtk::Align::Start)
             .build();
@@ -58,10 +56,7 @@ pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     };
 
     if fields.is_empty() {
-        append_hint(
-            widgets,
-            "项目尚未配置可编辑字段；现有 Frontmatter 会在保存时原样保留。",
-        );
+        append_hint(widgets, &i18n::text(UiMessage::NoEditableFieldsHint));
         append_remove_button(widgets, state);
         return;
     }
@@ -131,10 +126,7 @@ pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
         }
     }
     widgets.frontmatter_panel.append(&group);
-    append_hint(
-        widgets,
-        "Frontmatter 不显示在正文中；未配置字段、注释和顺序会原样保留。",
-    );
+    append_hint(widgets, &i18n::text(UiMessage::FrontmatterHiddenHint));
     append_remove_button(widgets, state);
 }
 
@@ -151,22 +143,25 @@ fn build_date_row(
         today = (2000, 1, 1);
     }
     let (year, month, day) = parse_date_parts(value, today).unwrap_or(today);
+    let year_unit = i18n::text(UiMessage::YearUnit);
+    let month_unit = i18n::text(UiMessage::MonthUnit);
+    let day_unit = i18n::text(UiMessage::DayUnit);
     let year_values = (2000..=today.0.max(2000))
         .rev()
-        .map(|value| format!("{value} 年"))
+        .map(|value| format!("{value} {year_unit}"))
         .collect::<Vec<_>>();
     let year_refs = year_values.iter().map(String::as_str).collect::<Vec<_>>();
     let year_input = gtk::DropDown::from_strings(&year_refs);
     year_input.set_selected(u32::try_from(today.0.saturating_sub(year)).unwrap_or(0));
     let max_month = u32::try_from(if year == today.0 { today.1 } else { 12 }).unwrap_or(1);
     let month_values = (1..=max_month)
-        .map(|value| format!("{value} 月"))
+        .map(|value| format!("{value} {month_unit}"))
         .collect::<Vec<_>>();
     let month_refs = month_values.iter().map(String::as_str).collect::<Vec<_>>();
     let month_model = gtk::StringList::new(&month_refs);
     let month_input = gtk::DropDown::builder().model(&month_model).build();
     month_input.set_selected(u32::try_from(month.saturating_sub(1)).unwrap_or(0));
-    let initial_days = day_strings(year, month, today);
+    let initial_days = day_strings(year, month, today, &day_unit);
     let initial_day_refs = initial_days.iter().map(String::as_str).collect::<Vec<_>>();
     let day_model = gtk::StringList::new(&initial_day_refs);
     let day_input = gtk::DropDown::builder().model(&day_model).build();
@@ -178,8 +173,11 @@ fn build_date_row(
         .hexpand(true)
         .css_classes(["heading"])
         .build();
+    let date_label = date_subtitle(value)
+        .map(str::to_owned)
+        .unwrap_or_else(|| i18n::text(UiMessage::DateUnset));
     let status = gtk::Label::builder()
-        .label(date_subtitle(value))
+        .label(date_label)
         .xalign(1.0)
         .css_classes(["dim-label"])
         .build();
@@ -192,7 +190,7 @@ fn build_date_row(
     selectors.append(&day_input);
     let clear_button = gtk::Button::builder()
         .icon_name("edit-clear-symbolic")
-        .tooltip_text("清除日期")
+        .tooltip_text(i18n::text(UiMessage::ClearDateTooltip))
         .css_classes(["flat"])
         .build();
     selectors.append(&clear_button);
@@ -255,7 +253,7 @@ fn build_date_row(
     let callback_status = status;
     let name = field.name.clone();
     clear_button.connect_clicked(move |_| {
-        callback_status.set_label("未设置");
+        callback_status.set_label(&i18n::text(UiMessage::DateUnset));
         update_field(
             &callback_widgets,
             &callback_state,
@@ -279,8 +277,10 @@ fn sync_date_options(
         return;
     }
     changing.set(true);
+    let month_unit = i18n::text(UiMessage::MonthUnit);
+    let day_unit = i18n::text(UiMessage::DayUnit);
     let max_month = u32::try_from(if year == today.0 { today.1 } else { 12 }).unwrap_or(1);
-    resize_numbered_options(month_dropdown, month_model, max_month, "月");
+    resize_numbered_options(month_dropdown, month_model, max_month, &month_unit);
     let month = i32::try_from(month_dropdown.selected()).unwrap_or(0) + 1;
     let calendar_max_day = days_in_month(year, month).unwrap_or(31);
     let max_day = if year == today.0 && month == today.1 {
@@ -288,7 +288,7 @@ fn sync_date_options(
     } else {
         calendar_max_day
     };
-    resize_numbered_options(day_dropdown, day_model, max_day, "日");
+    resize_numbered_options(day_dropdown, day_model, max_day, &day_unit);
     changing.set(false);
 }
 
@@ -334,7 +334,7 @@ fn build_tags_row(
         .max_children_per_line(6)
         .build();
     let entry = gtk::Entry::builder()
-        .placeholder_text("输入标签，按 Enter 或逗号添加")
+        .placeholder_text(i18n::text(UiMessage::TagsPlaceholder))
         .build();
     let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
     content.set_margin_top(10);
@@ -433,7 +433,7 @@ fn rebuild_tag_chips(
             .build();
         let button = gtk::Button::builder()
             .child(&content)
-            .tooltip_text(format!("移除标签 {tag}"))
+            .tooltip_text(i18n::text(UiMessage::RemoveTagTooltip { tag: tag.clone() }))
             .build();
         let callback_chips = chips.clone();
         let callback_values = Rc::clone(values);
@@ -488,7 +488,7 @@ fn update_field(
 
 fn append_remove_button(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     let button = gtk::Button::builder()
-        .label("移除 Frontmatter")
+        .label(i18n::text(UiMessage::RemoveFrontmatter))
         .css_classes(["destructive-action"])
         .halign(gtk::Align::Start)
         .build();
@@ -496,12 +496,15 @@ fn append_remove_button(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     let callback_state = Rc::clone(state);
     button.connect_clicked(move |_| {
         let dialog = adw::AlertDialog::builder()
-            .heading("移除 Frontmatter？")
-            .body("这会删除全部文章元数据，包括未配置字段和注释；正文不会受影响。")
+            .heading(i18n::text(UiMessage::RemoveFrontmatterHeading))
+            .body(i18n::text(UiMessage::RemoveFrontmatterBody))
             .default_response("cancel")
             .close_response("cancel")
             .build();
-        dialog.add_responses(&[("cancel", "取消"), ("remove", "移除")]);
+        dialog.add_responses(&[
+            ("cancel", i18n::text(UiMessage::Cancel).as_str()),
+            ("remove", i18n::text(UiMessage::Remove).as_str()),
+        ]);
         dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
         let response_widgets = callback_widgets.clone();
         let response_state = Rc::clone(&callback_state);
@@ -534,14 +537,14 @@ fn parse_date_parts(value: &str, today: (i32, i32, i32)) -> Option<(i32, i32, i3
     Some((year, month, day))
 }
 
-fn day_strings(year: i32, month: i32, today: (i32, i32, i32)) -> Vec<String> {
+fn day_strings(year: i32, month: i32, today: (i32, i32, i32), unit: &str) -> Vec<String> {
     let calendar_max = days_in_month(year, month).unwrap_or(31);
     let maximum = if year == today.0 && month == today.1 {
         u32::try_from(today.2).unwrap_or(1)
     } else {
         calendar_max
     };
-    (1..=maximum).map(|day| format!("{day} 日")).collect()
+    (1..=maximum).map(|day| format!("{day} {unit}")).collect()
 }
 
 fn days_in_month(year: i32, month: i32) -> Option<u32> {
@@ -567,12 +570,8 @@ fn days_in_month(year: i32, month: i32) -> Option<u32> {
     Some(u32::from(gtk::glib::Date::days_in_month(month, year)))
 }
 
-fn date_subtitle(value: &str) -> &str {
-    if value.is_empty() {
-        "未设置"
-    } else {
-        value
-    }
+fn date_subtitle(value: &str) -> Option<&str> {
+    (!value.is_empty()).then_some(value)
 }
 
 fn append_hint(widgets: &Widgets, text: &str) {
@@ -587,9 +586,13 @@ fn append_hint(widgets: &Widgets, text: &str) {
 
 fn field_title(field: &FieldSpec) -> String {
     if field.required {
-        format!("{} · 必填", field.name)
+        i18n::text(UiMessage::RequiredFieldTitle {
+            name: field.name.clone(),
+        })
     } else {
-        field.name.clone()
+        i18n::text(UiMessage::FieldTitle {
+            name: field.name.clone(),
+        })
     }
 }
 
@@ -617,8 +620,8 @@ mod tests {
 
     #[test]
     fn empty_date_has_a_clear_subtitle() {
-        assert_eq!(date_subtitle(""), "未设置");
-        assert_eq!(date_subtitle("2026-08-05"), "2026-08-05");
+        assert_eq!(date_subtitle(""), None);
+        assert_eq!(date_subtitle("2026-08-05"), Some("2026-08-05"));
     }
 
     #[test]

@@ -109,6 +109,25 @@ pub(crate) enum UiMessage {
     ContentDirectoryRepaired,
     CreatingProjectConfigStatus,
     ProjectCreated,
+    FrontmatterTitle,
+    FrontmatterOpenHint,
+    NoFrontmatterHint,
+    AddFrontmatter,
+    NoEditableFieldsHint,
+    FrontmatterHiddenHint,
+    ClearDateTooltip,
+    DateUnset,
+    TagsPlaceholder,
+    RemoveTagTooltip { tag: String },
+    RemoveFrontmatter,
+    RemoveFrontmatterHeading,
+    RemoveFrontmatterBody,
+    Remove,
+    YearUnit,
+    MonthUnit,
+    DayUnit,
+    FieldTitle { name: String },
+    RequiredFieldTitle { name: String },
 }
 
 impl UiMessage {
@@ -217,6 +236,25 @@ impl UiMessage {
             Self::ContentDirectoryRepaired => "content-directory-repaired",
             Self::CreatingProjectConfigStatus => "creating-project-config-status",
             Self::ProjectCreated => "project-created",
+            Self::FrontmatterTitle => "frontmatter-title",
+            Self::FrontmatterOpenHint => "frontmatter-open-hint",
+            Self::NoFrontmatterHint => "no-frontmatter-hint",
+            Self::AddFrontmatter => "add-frontmatter",
+            Self::NoEditableFieldsHint => "no-editable-fields-hint",
+            Self::FrontmatterHiddenHint => "frontmatter-hidden-hint",
+            Self::ClearDateTooltip => "clear-date-tooltip",
+            Self::DateUnset => "date-unset",
+            Self::TagsPlaceholder => "tags-placeholder",
+            Self::RemoveTagTooltip { .. } => "remove-tag-tooltip",
+            Self::RemoveFrontmatter => "remove-frontmatter",
+            Self::RemoveFrontmatterHeading => "remove-frontmatter-heading",
+            Self::RemoveFrontmatterBody => "remove-frontmatter-body",
+            Self::Remove => "remove",
+            Self::YearUnit => "year-unit",
+            Self::MonthUnit => "month-unit",
+            Self::DayUnit => "day-unit",
+            Self::FieldTitle { .. } => "field-title",
+            Self::RequiredFieldTitle { .. } => "required-field-title",
         }
     }
 
@@ -245,6 +283,12 @@ impl UiMessage {
             )]),
             Self::ProjectDirectoryLabel { path } => {
                 HashMap::from([(Cow::Borrowed("path"), FluentValue::from(path.clone()))])
+            }
+            Self::RemoveTagTooltip { tag } => {
+                HashMap::from([(Cow::Borrowed("tag"), FluentValue::from(tag.clone()))])
+            }
+            Self::FieldTitle { name } | Self::RequiredFieldTitle { name } => {
+                HashMap::from([(Cow::Borrowed("name"), FluentValue::from(name.clone()))])
             }
             _ => return None,
         };
@@ -370,5 +414,30 @@ pub(crate) fn message_samples() -> Vec<UiMessage> {
         UiMessage::ContentDirectoryRepaired,
         UiMessage::CreatingProjectConfigStatus,
         UiMessage::ProjectCreated,
+        UiMessage::FrontmatterTitle,
+        UiMessage::FrontmatterOpenHint,
+        UiMessage::NoFrontmatterHint,
+        UiMessage::AddFrontmatter,
+        UiMessage::NoEditableFieldsHint,
+        UiMessage::FrontmatterHiddenHint,
+        UiMessage::ClearDateTooltip,
+        UiMessage::DateUnset,
+        UiMessage::TagsPlaceholder,
+        UiMessage::RemoveTagTooltip {
+            tag: "rust".to_owned(),
+        },
+        UiMessage::RemoveFrontmatter,
+        UiMessage::RemoveFrontmatterHeading,
+        UiMessage::RemoveFrontmatterBody,
+        UiMessage::Remove,
+        UiMessage::YearUnit,
+        UiMessage::MonthUnit,
+        UiMessage::DayUnit,
+        UiMessage::FieldTitle {
+            name: "title".to_owned(),
+        },
+        UiMessage::RequiredFieldTitle {
+            name: "title".to_owned(),
+        },
     ]
 }
