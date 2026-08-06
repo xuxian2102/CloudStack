@@ -89,7 +89,8 @@ pub fn present(application: &adw::Application) {
         return;
     }
 
-    glib::set_application_name("云栈 CloudStack");
+    let app_name = i18n::text(UiMessage::AppName);
+    glib::set_application_name(&app_name);
     sourceview::init();
 
     let state = Rc::new(RefCell::new(EditorState::default()));
@@ -117,47 +118,47 @@ pub fn present(application: &adw::Application) {
 fn build_window(application: &adw::Application) -> Widgets {
     let window = adw::ApplicationWindow::builder()
         .application(application)
-        .title("云栈 CloudStack")
+        .title(i18n::text(UiMessage::AppName))
         .default_width(1180)
         .default_height(760)
         .build();
 
     let open_button = gtk::Button::builder()
         .icon_name("document-open-symbolic")
-        .tooltip_text("打开项目文件夹 (Ctrl+O)")
+        .tooltip_text(i18n::text(UiMessage::OpenProjectTooltip))
         .action_name("win.open-project")
         .build();
     let home_button = gtk::Button::builder()
         .icon_name("go-home-symbolic")
-        .tooltip_text("返回主页，关闭当前项目")
+        .tooltip_text(i18n::text(UiMessage::CloseProjectTooltip))
         .action_name("win.close-project")
         .sensitive(false)
         .build();
     let save_content = adw::ButtonContent::builder()
         .icon_name("document-save-symbolic")
-        .label("保存")
+        .label(i18n::text(UiMessage::SaveLabel))
         .build();
     let save_button = gtk::Button::builder()
         .child(&save_content)
-        .tooltip_text("保存文章 (Ctrl+S)")
+        .tooltip_text(i18n::text(UiMessage::SaveTooltip))
         .action_name("win.save")
         .sensitive(false)
         .css_classes(["suggested-action"])
         .build();
     let properties_button = gtk::Button::builder()
         .icon_name("document-properties-symbolic")
-        .tooltip_text("文章属性")
+        .tooltip_text(i18n::text(UiMessage::ArticlePropertiesTooltip))
         .action_name("win.toggle-properties")
         .sensitive(false)
         .build();
     let project_label = gtk::Label::builder()
-        .label("尚未打开项目")
+        .label(i18n::text(UiMessage::NoProject))
         .ellipsize(gtk::pango::EllipsizeMode::Middle)
         .max_width_chars(48)
         .build();
     let settings_button = gtk::Button::builder()
         .icon_name("preferences-system-symbolic")
-        .tooltip_text("设置")
+        .tooltip_text(i18n::text(UiMessage::SettingsTooltip))
         .action_name("win.open-settings")
         .build();
 
@@ -181,26 +182,26 @@ fn build_window(application: &adw::Application) -> Widgets {
         .build();
 
     let sidebar_title = gtk::Label::builder()
-        .label("文章")
+        .label(i18n::text(UiMessage::ArticlesHeading))
         .xalign(0.0)
         .hexpand(true)
         .css_classes(["heading"])
         .build();
     let new_button = gtk::Button::builder()
         .icon_name("list-add-symbolic")
-        .tooltip_text("新建文章")
+        .tooltip_text(i18n::text(UiMessage::NewArticleTooltip))
         .action_name("win.new-post")
         .sensitive(false)
         .build();
     let rename_button = gtk::Button::builder()
         .icon_name("document-edit-symbolic")
-        .tooltip_text("重命名当前文章")
+        .tooltip_text(i18n::text(UiMessage::RenameArticleTooltip))
         .action_name("win.rename-post")
         .sensitive(false)
         .build();
     let delete_button = gtk::Button::builder()
         .icon_name("user-trash-symbolic")
-        .tooltip_text("删除当前文章")
+        .tooltip_text(i18n::text(UiMessage::DeleteArticleTooltip))
         .action_name("win.delete-post")
         .sensitive(false)
         .build();
@@ -260,9 +261,8 @@ fn build_window(application: &adw::Application) -> Widgets {
         .left_margin(32)
         .right_margin(32)
         .build();
-    buffer.set_text(
-        "打开一个文件夹以开始编辑。\n\n如果还没有 CloudStack 配置，应用会引导你创建基本项目。\n",
-    );
+    let initial_editor_text = i18n::text(UiMessage::InitialEditorText);
+    buffer.set_text(&format!("{initial_editor_text}\n"));
 
     let editor_scroll = gtk::ScrolledWindow::builder()
         .hexpand(true)
@@ -273,7 +273,7 @@ fn build_window(application: &adw::Application) -> Widgets {
     let search_panel = SearchPanel::new(&buffer, &editor);
     let preview = crate::preview::Preview::new(&buffer, &editor, &editor_scroll, &toast_overlay);
     let status_label = gtk::Label::builder()
-        .label("就绪")
+        .label(i18n::text(UiMessage::ReadyStatus))
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .margin_top(6)
@@ -723,7 +723,7 @@ fn select_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     retry_pending_asset_cleanup(state);
 
     let dialog = gtk::FileDialog::builder()
-        .title("选择博客项目目录")
+        .title(i18n::text(UiMessage::SelectProjectDialogTitle))
         .modal(true)
         .build();
     let widgets = widgets.clone();
@@ -735,7 +735,7 @@ fn select_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
         move |result| match result {
             Ok(folder) => {
                 let Some(path) = folder.path() else {
-                    show_error(&widgets, "只能打开本地项目目录");
+                    show_error(&widgets, &i18n::text(UiMessage::OnlyLocalProject));
                     return;
                 };
                 open_project(&widgets, &state, &path);
@@ -770,8 +770,12 @@ fn close_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     widgets.buffer.set_text("");
     widgets.preview.clear(epoch);
     widgets.frontmatter_split.set_show_sidebar(false);
-    widgets.project_label.set_label("尚未打开项目");
-    widgets.window.set_title(Some("云栈 CloudStack"));
+    widgets
+        .project_label
+        .set_label(&i18n::text(UiMessage::NoProject));
+    widgets
+        .window
+        .set_title(Some(&i18n::text(UiMessage::AppName)));
     widgets.content_stack.set_visible_child_name("welcome");
     git_panel::refresh(widgets, state);
     set_busy(widgets, state, false, "");
@@ -823,7 +827,9 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
                         .set_label(&context.root.display().to_string());
                     widgets
                         .status_label
-                        .set_label(&format!("已打开项目 · {} 篇文章", post_summaries.len()));
+                        .set_label(&i18n::text(UiMessage::ProjectOpenedStatus {
+                            count: post_summaries.len(),
+                        }));
                     let mut editor_state = state.borrow_mut();
                     editor_state.loading_buffer = true;
                     editor_state.project = Some(context);
@@ -837,7 +843,8 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
                     drop(editor_state);
                     let post_summaries = state.borrow().posts.clone();
                     populate_post_list(&widgets, &state, &post_summaries);
-                    widgets.buffer.set_text("从左侧选择一篇文章。\n");
+                    let empty_post_list = i18n::text(UiMessage::InitialPostListText);
+                    widgets.buffer.set_text(&format!("{empty_post_list}\n"));
                     state.borrow_mut().loading_buffer = false;
                     widgets.preview.clear(epoch);
                     #[cfg(feature = "e2e")]
@@ -849,7 +856,9 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
                     let folder_name = project_folder_name(&root_for_recent);
                     widgets
                         .window
-                        .set_title(Some(&format!("云栈 CloudStack — {folder_name}")));
+                        .set_title(Some(&i18n::text(UiMessage::WindowTitle {
+                            folder: folder_name,
+                        })));
                     widgets.content_stack.set_visible_child_name("workspace");
                     recent::touch(&root_for_recent);
                     recent::maybe_reopen_last_document(&widgets, &state, root_for_recent.clone());
@@ -901,20 +910,25 @@ fn show_content_repair_dialog(
     let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
     content.append(
         &gtk::Label::builder()
-            .label("可以重新创建原目录，也可以输入新的项目内相对目录。")
+            .label(i18n::text(UiMessage::ContentRepairDescription))
             .xalign(0.0)
             .wrap(true)
             .build(),
     );
     content.append(&directory_entry);
     let dialog = adw::AlertDialog::builder()
-        .heading("文章目录不存在")
-        .body(format!("配置中的文章目录“{content_dir}”已被移动或删除。"))
+        .heading(i18n::text(UiMessage::MissingContentDirectoryHeading))
+        .body(i18n::text(UiMessage::MissingContentDirectoryBody {
+            content_dir: content_dir.to_owned(),
+        }))
         .extra_child(&content)
         .default_response("repair")
         .close_response("cancel")
         .build();
-    dialog.add_responses(&[("cancel", "取消"), ("repair", "修复并打开")]);
+    dialog.add_responses(&[
+        ("cancel", i18n::text(UiMessage::Cancel).as_str()),
+        ("repair", i18n::text(UiMessage::RepairAndOpen).as_str()),
+    ]);
     dialog.set_response_appearance("repair", adw::ResponseAppearance::Suggested);
 
     let callback_widgets = widgets.clone();
@@ -923,7 +937,10 @@ fn show_content_repair_dialog(
     dialog.connect_response(Some("repair"), move |_, _| {
         let content_dir = callback_entry.text().trim().to_owned();
         if content_dir.is_empty() {
-            show_error(&callback_widgets, "文章目录不能为空");
+            show_error(
+                &callback_widgets,
+                &i18n::text(UiMessage::ContentDirectoryEmpty),
+            );
             return;
         }
         repair_and_open_project(
@@ -944,7 +961,8 @@ fn repair_and_open_project(
     root: PathBuf,
     content_dir: String,
 ) {
-    set_busy(widgets, state, true, "正在修复文章目录…");
+    let busy_message = i18n::text(UiMessage::RepairingContentDirectoryStatus);
+    set_busy(widgets, state, true, &busy_message);
     let task_root = root.clone();
     let widgets = widgets.clone();
     let state = Rc::clone(state);
@@ -954,7 +972,7 @@ fn repair_and_open_project(
             set_busy(&widgets, &state, false, "");
             match result {
                 Ok(_) => {
-                    toast(&widgets, "文章目录已修复");
+                    toast(&widgets, &i18n::text(UiMessage::ContentDirectoryRepaired));
                     open_project(&widgets, &state, &root);
                 }
                 Err(error) => show_error(&widgets, &error.to_string()),
@@ -971,20 +989,21 @@ fn show_project_initialization_dialog(
 ) {
     let directory_entry = gtk::Entry::builder()
         .text(suggested_content_dir)
-        .placeholder_text("notes")
+        .placeholder_text(i18n::text(UiMessage::ProjectDirectoryPlaceholder))
         .activates_default(true)
         .build();
-    let blog_fields =
-        gtk::CheckButton::with_label("添加常用博客属性（标题、发布日期、草稿和标签）");
+    let blog_fields = gtk::CheckButton::with_label(&i18n::text(UiMessage::BlogFrontmatterOption));
     let path_label = gtk::Label::builder()
-        .label(format!("项目目录：{}", root.display()))
+        .label(i18n::text(UiMessage::ProjectDirectoryLabel {
+            path: root.display().to_string(),
+        }))
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::Middle)
         .tooltip_text(root.display().to_string())
         .css_classes(["dim-label"])
         .build();
     let directory_label = gtk::Label::builder()
-        .label("文章目录（相对于项目目录；不存在时会创建）")
+        .label(i18n::text(UiMessage::ContentDirectoryLabel))
         .xalign(0.0)
         .build();
     let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -994,13 +1013,16 @@ fn show_project_initialization_dialog(
     content.append(&blog_fields);
 
     let dialog = adw::AlertDialog::builder()
-        .heading("创建 CloudStack 项目？")
-        .body("这个文件夹还没有配置。确认后将创建 .cloudstack.json；不会修改已有文章。")
+        .heading(i18n::text(UiMessage::CreateProjectHeading))
+        .body(i18n::text(UiMessage::CreateProjectBody))
         .extra_child(&content)
         .default_response("create")
         .close_response("cancel")
         .build();
-    dialog.add_responses(&[("cancel", "取消"), ("create", "创建并打开")]);
+    dialog.add_responses(&[
+        ("cancel", i18n::text(UiMessage::Cancel).as_str()),
+        ("create", i18n::text(UiMessage::CreateAndOpen).as_str()),
+    ]);
     dialog.set_response_appearance("create", adw::ResponseAppearance::Suggested);
 
     let callback_widgets = widgets.clone();
@@ -1009,7 +1031,10 @@ fn show_project_initialization_dialog(
     dialog.connect_response(Some("create"), move |_, _| {
         let content_dir = callback_entry.text().trim().to_owned();
         if content_dir.is_empty() {
-            show_error(&callback_widgets, "文章目录不能为空");
+            show_error(
+                &callback_widgets,
+                &i18n::text(UiMessage::ContentDirectoryEmpty),
+            );
             return;
         }
         initialize_and_open_project(
@@ -1035,7 +1060,8 @@ fn initialize_and_open_project(
     if state.borrow().busy {
         return;
     }
-    set_busy(widgets, state, true, "正在创建项目配置…");
+    let busy_message = i18n::text(UiMessage::CreatingProjectConfigStatus);
+    set_busy(widgets, state, true, &busy_message);
     let task_root = root.clone();
     let widgets = widgets.clone();
     let state = Rc::clone(state);
@@ -1050,7 +1076,7 @@ fn initialize_and_open_project(
             set_busy(&widgets, &state, false, "");
             match result {
                 Ok(_) => {
-                    toast(&widgets, "CloudStack 项目已创建");
+                    toast(&widgets, &i18n::text(UiMessage::ProjectCreated));
                     open_project(&widgets, &state, &root);
                 }
                 Err(error) => show_error(&widgets, &error.to_string()),
@@ -1416,9 +1442,13 @@ fn set_busy(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, busy: bool, mes
         } else if editor_state.project.is_some() {
             widgets
                 .status_label
-                .set_label(&format!("已打开项目 · {} 篇文章", editor_state.posts.len()));
+                .set_label(&i18n::text(UiMessage::ProjectOpenedStatus {
+                    count: editor_state.posts.len(),
+                }));
         } else {
-            widgets.status_label.set_label("就绪");
+            widgets
+                .status_label
+                .set_label(&i18n::text(UiMessage::ReadyStatus));
         }
     }
     sync_controls(widgets, state);

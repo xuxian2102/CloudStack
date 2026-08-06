@@ -123,6 +123,25 @@ mod tests {
         assert_eq!(strip_bidi_isolates(&chinese), "先保存 2 篇");
     }
 
+    #[test]
+    fn formats_first_round_parameterized_messages() {
+        let extension = UiMessage::CreateArticleDefaultName {
+            extension: ".md".to_owned(),
+        };
+        let extension_args = extension.args().unwrap();
+        let english = LOCALES.lookup_with_args(&langid!("en-US"), extension.id(), &extension_args);
+        let delete = UiMessage::DeleteArticleBody {
+            path: "notes/example.md".to_owned(),
+        };
+        let delete_args = delete.args().unwrap();
+        let chinese = LOCALES.lookup_with_args(&langid!("zh-CN"), delete.id(), &delete_args);
+        assert_eq!(strip_bidi_isolates(&english), "new-post.md");
+        assert_eq!(
+            strip_bidi_isolates(&chinese),
+            "notes/example.md 及正文实际引用的同名目录图片将移到系统废纸篓。"
+        );
+    }
+
     fn strip_bidi_isolates(text: &str) -> String {
         text.chars()
             .filter(|character| !matches!(character, '\u{2068}' | '\u{2069}'))

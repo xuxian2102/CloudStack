@@ -6,6 +6,8 @@ use adw::prelude::*;
 use cloudstack_core::services::recent::RecentProject;
 use gtk::glib;
 
+use crate::i18n::{self, UiMessage};
+
 #[derive(Clone)]
 pub(super) struct WelcomePage {
     root: adw::StatusPage,
@@ -19,24 +21,24 @@ pub(super) struct WelcomePage {
 impl WelcomePage {
     pub(super) fn new() -> Self {
         let open_button = gtk::Button::builder()
-            .label("打开项目文件夹")
-            .tooltip_text("打开项目文件夹 (Ctrl+O)")
+            .label(i18n::text(UiMessage::WelcomeOpenProjectLabel))
+            .tooltip_text(i18n::text(UiMessage::WelcomeOpenProjectTooltip))
             .action_name("win.open-project")
             .css_classes(["suggested-action", "pill"])
             .halign(gtk::Align::Center)
             .build();
         let shortcut_hint = gtk::Label::builder()
-            .label("快捷键：Ctrl+O")
+            .label(i18n::text(UiMessage::WelcomeShortcutHint))
             .css_classes(["dim-label", "caption"])
             .halign(gtk::Align::Center)
             .build();
 
         let pinned_group = adw::PreferencesGroup::builder()
-            .title("已固定")
+            .title(i18n::text(UiMessage::PinnedProjectsTitle))
             .visible(false)
             .build();
         let recent_group = adw::PreferencesGroup::builder()
-            .title("最近打开的项目")
+            .title(i18n::text(UiMessage::RecentProjectsTitle))
             .build();
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
@@ -52,8 +54,8 @@ impl WelcomePage {
 
         let root = adw::StatusPage::builder()
             .icon_name("folder-symbolic")
-            .title("欢迎使用云栈 CloudStack")
-            .description("打开一个包含 .cloudstack.json 的项目文件夹以开始编辑。")
+            .title(i18n::text(UiMessage::WelcomeTitle))
+            .description(i18n::text(UiMessage::WelcomeDescription))
             .child(&clamp)
             .vexpand(true)
             .build();
@@ -109,7 +111,7 @@ impl WelcomePage {
             &self.recent_group,
             &self.recent_rows,
             &recent,
-            Some("还没有最近打开的项目"),
+            Some(&i18n::text(UiMessage::NoRecentProjects)),
             &on_open,
             &on_remove,
             &on_toggle_pin,
@@ -165,16 +167,16 @@ fn rebuild_group(
                 "non-starred-symbolic"
             })
             .tooltip_text(if project.pinned {
-                "取消固定"
+                i18n::text(UiMessage::UnpinProjectTooltip)
             } else {
-                "固定到主页顶部"
+                i18n::text(UiMessage::PinProjectTooltip)
             })
             .valign(gtk::Align::Center)
             .css_classes(["flat"])
             .build();
         let remove_button = gtk::Button::builder()
             .icon_name("list-remove-symbolic")
-            .tooltip_text("从最近列表中移除，不会删除项目文件")
+            .tooltip_text(i18n::text(UiMessage::RemoveRecentProjectTooltip))
             .valign(gtk::Align::Center)
             .css_classes(["flat"])
             .build();
@@ -210,5 +212,5 @@ fn format_last_opened(last_opened_ms: u64) -> String {
     glib::DateTime::from_unix_local(seconds)
         .and_then(|datetime| datetime.format("%Y-%m-%d %H:%M"))
         .map(|value| value.to_string())
-        .unwrap_or_else(|_| "时间未知".to_string())
+        .unwrap_or_else(|_| i18n::text(UiMessage::UnknownTime))
 }

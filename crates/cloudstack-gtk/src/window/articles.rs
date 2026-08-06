@@ -8,6 +8,7 @@ use super::{
     display_document, drafts, git_panel, has_unsaved_documents, populate_post_list, set_busy,
     show_error, toast, EditorState, Widgets,
 };
+use crate::i18n::{self, UiMessage};
 use crate::tasks;
 
 pub(super) fn show_create_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
@@ -28,19 +29,28 @@ pub(super) fn show_create_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorSta
         .first()
         .map(String::as_str)
         .unwrap_or(".md");
+    let default_name = i18n::text(UiMessage::CreateArticleDefaultName {
+        extension: extension.to_owned(),
+    });
+    let placeholder = i18n::text(UiMessage::CreateArticlePlaceholder {
+        extension: extension.to_owned(),
+    });
     let id_entry = gtk::Entry::builder()
-        .text(format!("new-post{extension}"))
-        .placeholder_text(format!("article{extension}"))
+        .text(default_name)
+        .placeholder_text(placeholder)
         .activates_default(true)
         .build();
     let dialog = adw::AlertDialog::builder()
-        .heading("新建文章")
-        .body("输入相对于内容目录的文件名，也可以包含子目录。")
+        .heading(i18n::text(UiMessage::CreateArticleHeading))
+        .body(i18n::text(UiMessage::CreateArticleBody))
         .extra_child(&id_entry)
         .default_response("create")
         .close_response("cancel")
         .build();
-    dialog.add_responses(&[("cancel", "取消"), ("create", "创建")]);
+    dialog.add_responses(&[
+        ("cancel", i18n::text(UiMessage::Cancel).as_str()),
+        ("create", i18n::text(UiMessage::Create).as_str()),
+    ]);
     dialog.set_response_appearance("create", adw::ResponseAppearance::Suggested);
 
     let parent = widgets.window.clone();
@@ -50,7 +60,8 @@ pub(super) fn show_create_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorSta
     dialog.connect_response(Some("create"), move |_, _| {
         let id = callback_entry.text().trim().to_owned();
         if id.is_empty() {
-            show_error(&callback_widgets, "文章文件名不能为空");
+            let message = i18n::text(UiMessage::ArticleFilenameEmpty);
+            show_error(&callback_widgets, &message);
             return;
         }
         create_post(&callback_widgets, &state, context.clone(), id);
@@ -66,7 +77,8 @@ fn create_post(
     context: cloudstack_core::ProjectContext,
     id: String,
 ) {
-    set_busy(widgets, state, true, "正在创建文章…");
+    let busy_message = i18n::text(UiMessage::CreatingArticleStatus);
+    set_busy(widgets, state, true, &busy_message);
     let widgets = widgets.clone();
     let state = Rc::clone(state);
     tasks::run(
@@ -81,7 +93,7 @@ fn create_post(
                     populate_post_list(&widgets, &state, &summaries);
                     state.borrow_mut().posts = summaries;
                     display_document(&widgets, &state, document, false);
-                    toast(&widgets, "文章已创建");
+                    toast(&widgets, &i18n::text(UiMessage::ArticleCreated));
                 }
                 Err(error) => show_error(&widgets, &error.to_string()),
             }
@@ -108,13 +120,16 @@ pub(super) fn show_rename_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorSta
         .activates_default(true)
         .build();
     let dialog = adw::AlertDialog::builder()
-        .heading("重命名文章")
-        .body("文章引用的同名目录图片会一并安全移动并更新 Markdown 路径。")
+        .heading(i18n::text(UiMessage::RenameArticleHeading))
+        .body(i18n::text(UiMessage::RenameArticleBody))
         .extra_child(&id_entry)
         .default_response("rename")
         .close_response("cancel")
         .build();
-    dialog.add_responses(&[("cancel", "取消"), ("rename", "重命名")]);
+    dialog.add_responses(&[
+        ("cancel", i18n::text(UiMessage::Cancel).as_str()),
+        ("rename", i18n::text(UiMessage::Rename).as_str()),
+    ]);
     dialog.set_response_appearance("rename", adw::ResponseAppearance::Suggested);
 
     let parent = widgets.window.clone();
@@ -124,7 +139,8 @@ pub(super) fn show_rename_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorSta
     dialog.connect_response(Some("rename"), move |_, _| {
         let new_id = callback_entry.text().trim().to_owned();
         if new_id.is_empty() {
-            show_error(&callback_widgets, "文章文件名不能为空");
+            let message = i18n::text(UiMessage::ArticleFilenameEmpty);
+            show_error(&callback_widgets, &message);
             return;
         }
         if new_id == document.id {
@@ -150,7 +166,8 @@ fn rename_post(
     document: cloudstack_core::PostDocument,
     new_id: String,
 ) {
-    set_busy(widgets, state, true, "正在重命名文章…");
+    let busy_message = i18n::text(UiMessage::RenamingArticleStatus);
+    set_busy(widgets, state, true, &busy_message);
     let old_id = document.id.clone();
     let task_context = context.clone();
     let widgets = widgets.clone();
@@ -174,7 +191,7 @@ fn rename_post(
                     drop(editor_state);
                     drafts::delete_for_post(&widgets, &state, context.clone(), old_id.clone());
                     display_document(&widgets, &state, renamed, false);
-                    toast(&widgets, "文章已重命名");
+                    toast(&widgets, &i18n::text(UiMessage::ArticleRenamed));
                 }
                 Err(error) => show_error(&widgets, &error.to_string()),
             }
@@ -196,16 +213,19 @@ pub(super) fn show_delete_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorSta
         };
         (context.clone(), document.clone())
     };
+    let delete_body = i18n::text(UiMessage::DeleteArticleBody {
+        path: document.relative_path.clone(),
+    });
     let dialog = adw::AlertDialog::builder()
-        .heading("把文章移到废纸篓？")
-        .body(format!(
-            "{} 及正文实际引用的同名目录图片将移到系统废纸篓。",
-            document.relative_path
-        ))
+        .heading(i18n::text(UiMessage::DeleteArticleHeading))
+        .body(delete_body)
         .default_response("cancel")
         .close_response("cancel")
         .build();
-    dialog.add_responses(&[("cancel", "取消"), ("delete", "移到废纸篓")]);
+    dialog.add_responses(&[
+        ("cancel", i18n::text(UiMessage::Cancel).as_str()),
+        ("delete", i18n::text(UiMessage::MoveToTrash).as_str()),
+    ]);
     dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
 
     let parent = widgets.window.clone();
@@ -223,7 +243,8 @@ fn delete_post(
     context: cloudstack_core::ProjectContext,
     document: cloudstack_core::PostDocument,
 ) {
-    set_busy(widgets, state, true, "正在删除文章…");
+    let busy_message = i18n::text(UiMessage::DeletingArticleStatus);
+    set_busy(widgets, state, true, &busy_message);
     let post_id = document.id.clone();
     let task_context = context.clone();
     let widgets = widgets.clone();
@@ -249,12 +270,15 @@ fn delete_post(
                     editor_state.loading_buffer = true;
                     drop(editor_state);
                     drafts::delete_for_post(&widgets, &state, context.clone(), post_id.clone());
-                    widgets.buffer.set_text("从左侧选择一篇文章。\n");
+                    let empty_post_list = i18n::text(UiMessage::InitialPostListText);
+                    widgets.buffer.set_text(&format!("{empty_post_list}\n"));
                     state.borrow_mut().loading_buffer = false;
                     widgets.preview.clear(epoch);
                     super::frontmatter::refresh(&widgets, &state);
-                    widgets.window.set_title(Some("云栈 CloudStack"));
-                    toast(&widgets, "文章已移到系统废纸篓");
+                    widgets
+                        .window
+                        .set_title(Some(&i18n::text(UiMessage::AppName)));
+                    toast(&widgets, &i18n::text(UiMessage::ArticleDeleted));
                 }
                 Err(error) => show_error(&widgets, &error.to_string()),
             }
