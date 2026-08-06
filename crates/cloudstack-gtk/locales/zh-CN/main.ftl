@@ -1,0 +1,40 @@
+save-success = 文章已保存
+save-success-with-newer-edits = 文章已保存，但编辑器里还有更新的修改未保存
+batch-save-success-continue-git = 未保存文章已保存，请继续执行 Git 操作
+
+git-no-action = 已同步
+git-no-action-tooltip = 当前没有可执行的 Git 操作
+git-primary-action-tooltip = 执行建议的 Git 操作
+git-no-committable-changes = 没有可提交的更改
+git-no-committable-changes-tooltip = 当前没有可提交的受管改动
+git-save-before-action = 先保存 { $count } 篇
+git-save-before-action-tooltip = 执行 Git 操作前先保存 { $count } 篇未保存文章
+
+git-action-none = 无需操作
+git-action-initialize = 初始化
+git-action-configure-identity = 身份
+git-action-commit = 提交
+git-action-configure-remote = 远端
+git-action-push-upstream = 推送
+git-action-push = 推送
+git-action-pull-fast-forward = 同步
+git-action-initialize-tooltip = 初始化 Git
+git-action-configure-identity-tooltip = 配置提交身份
+git-action-commit-tooltip = 提交受管改动
+git-action-configure-remote-tooltip = 配置远端
+git-action-push-upstream-tooltip = 首次推送
+git-action-push-tooltip = 推送提交
+git-action-pull-fast-forward-tooltip = 快进同步
+
+settings-color-scheme-system = 跟随系统
+settings-color-scheme-light = 浅色
+settings-color-scheme-dark = 深色
+settings-color-scheme-title = 配色方案
+settings-auto-reopen-title = 启动时自动打开最近项目
+settings-auto-reopen-subtitle = 跳过欢迎页，直接进入最后一次打开的项目
+settings-restore-document-title = 打开项目时跳回上次打开的文章
+settings-restore-document-subtitle = 记住每个项目最后打开的文章
+settings-appearance-group = 外观
+settings-open-project-group = 打开项目
+settings-general-page = 通用
+settings-dialog-title = 设置

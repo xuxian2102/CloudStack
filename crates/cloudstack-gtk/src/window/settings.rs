@@ -6,6 +6,7 @@ use cloudstack_core::AppError;
 use gtk::glib;
 
 use crate::app::{SettingsWriter, SettingsWriterAction, VersionedSettings};
+use crate::i18n::{self, UiMessage};
 use crate::tasks;
 
 use super::{app_data_dir, toast, Widgets};
@@ -146,14 +147,23 @@ pub(super) fn show_dialog(widgets: &Widgets) {
 }
 
 fn build_and_present_dialog(widgets: &Widgets, current: AppSettings) {
-    let model = gtk::StringList::new(&["跟随系统", "浅色", "深色"]);
+    let color_scheme_options = [
+        i18n::text(UiMessage::SettingsColorSchemeSystem),
+        i18n::text(UiMessage::SettingsColorSchemeLight),
+        i18n::text(UiMessage::SettingsColorSchemeDark),
+    ];
+    let color_scheme_options = color_scheme_options
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let model = gtk::StringList::new(&color_scheme_options);
     let selected_index = match current.color_scheme {
         ColorScheme::System => 0,
         ColorScheme::Light => 1,
         ColorScheme::Dark => 2,
     };
     let color_scheme_row = adw::ComboRow::builder()
-        .title("配色方案")
+        .title(i18n::text(UiMessage::SettingsColorSchemeTitle))
         .model(&model)
         .selected(selected_index)
         .build();
@@ -172,8 +182,8 @@ fn build_and_present_dialog(widgets: &Widgets, current: AppSettings) {
     });
 
     let auto_reopen_row = adw::SwitchRow::builder()
-        .title("启动时自动打开最近项目")
-        .subtitle("跳过欢迎页，直接进入最后一次打开的项目")
+        .title(i18n::text(UiMessage::SettingsAutoReopenTitle))
+        .subtitle(i18n::text(UiMessage::SettingsAutoReopenSubtitle))
         .active(current.auto_reopen_last_project)
         .build();
 
@@ -186,8 +196,8 @@ fn build_and_present_dialog(widgets: &Widgets, current: AppSettings) {
     });
 
     let restore_document_row = adw::SwitchRow::builder()
-        .title("打开项目时跳回上次打开的文章")
-        .subtitle("记住每个项目最后打开的文章")
+        .title(i18n::text(UiMessage::SettingsRestoreDocumentTitle))
+        .subtitle(i18n::text(UiMessage::SettingsRestoreDocumentSubtitle))
         .active(current.restore_last_document_on_open)
         .build();
 
@@ -199,18 +209,26 @@ fn build_and_present_dialog(widgets: &Widgets, current: AppSettings) {
         });
     });
 
-    let appearance_group = adw::PreferencesGroup::builder().title("外观").build();
+    let appearance_group = adw::PreferencesGroup::builder()
+        .title(i18n::text(UiMessage::SettingsAppearanceGroup))
+        .build();
     appearance_group.add(&color_scheme_row);
 
-    let startup_group = adw::PreferencesGroup::builder().title("打开项目").build();
+    let startup_group = adw::PreferencesGroup::builder()
+        .title(i18n::text(UiMessage::SettingsOpenProjectGroup))
+        .build();
     startup_group.add(&auto_reopen_row);
     startup_group.add(&restore_document_row);
 
-    let page = adw::PreferencesPage::builder().title("通用").build();
+    let page = adw::PreferencesPage::builder()
+        .title(i18n::text(UiMessage::SettingsGeneralPage))
+        .build();
     page.add(&appearance_group);
     page.add(&startup_group);
 
-    let dialog = adw::PreferencesDialog::builder().title("设置").build();
+    let dialog = adw::PreferencesDialog::builder()
+        .title(i18n::text(UiMessage::SettingsDialogTitle))
+        .build();
     dialog.add(&page);
     SETTINGS_DIALOG.with(|cell| *cell.borrow_mut() = Some(dialog.downgrade()));
     dialog.present(Some(&widgets.window));

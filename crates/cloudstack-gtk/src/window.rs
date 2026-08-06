@@ -20,6 +20,7 @@ use gtk::{gdk, gio, glib};
 use sourceview::prelude::*;
 
 use crate::app::{apply_successful_save, classify_save_completion, SaveCompletionOutcome};
+use crate::i18n::{self, UiMessage};
 use crate::search::SearchPanel;
 use crate::tasks;
 
@@ -1342,12 +1343,12 @@ fn save_document_then(
                         SaveCompletionOutcome::Clean => {
                             update_post_marker(&widgets, &state, &document.id);
                             widgets.status_label.set_label(&document.relative_path);
-                            toast(&widgets, "文章已保存");
+                            toast(&widgets, &i18n::text(UiMessage::SaveSuccess));
                             drafts::delete_for_post(&widgets, &state, context, document.id);
                             continue_after_save = true;
                         }
                         SaveCompletionOutcome::RevisionOnly => {
-                            toast(&widgets, "文章已保存，但编辑器里还有更新的修改未保存");
+                            toast(&widgets, &i18n::text(UiMessage::SaveSuccessWithNewerEdits));
                         }
                         SaveCompletionOutcome::NotCurrent => {}
                     }

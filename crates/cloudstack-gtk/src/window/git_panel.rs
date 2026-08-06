@@ -12,6 +12,7 @@ use gtk::glib;
 use super::{
     drafts, has_unsaved_documents, open_project, set_busy, show_error, toast, EditorState, Widgets,
 };
+use crate::i18n::{self, UiMessage};
 use crate::tasks;
 
 const MAX_DISPLAYED_CHANGES: usize = 100;
@@ -72,8 +73,8 @@ impl GitPanel {
             .single_line_mode(true)
             .build();
         let publish_button = gtk::Button::builder()
-            .label("提交")
-            .tooltip_text("执行建议的 Git 操作")
+            .label(i18n::text(UiMessage::GitActionCommit))
+            .tooltip_text(i18n::text(UiMessage::GitPrimaryActionTooltip))
             .action_name("win.git-primary")
             .sensitive(false)
             .css_classes(["suggested-action"])
@@ -350,28 +351,35 @@ impl GitPanel {
     pub(super) fn set_primary_action(&self, action: EffectivePrimaryAction) {
         match action {
             EffectivePrimaryAction::None => {
-                self.publish_button.set_label("已同步");
                 self.publish_button
-                    .set_tooltip_text(Some("当前没有可执行的 Git 操作"));
+                    .set_label(&i18n::text(UiMessage::GitNoAction));
+                self.publish_button
+                    .set_tooltip_text(Some(&i18n::text(UiMessage::GitNoActionTooltip)));
                 self.publish_button.set_sensitive(false);
             }
             EffectivePrimaryAction::NoChanges => {
-                self.publish_button.set_label("没有可提交的更改");
                 self.publish_button
-                    .set_tooltip_text(Some("当前没有可提交的受管改动"));
+                    .set_label(&i18n::text(UiMessage::GitNoCommittableChanges));
+                self.publish_button
+                    .set_tooltip_text(Some(&i18n::text(UiMessage::GitNoCommittableChangesTooltip)));
                 self.publish_button.set_sensitive(false);
             }
             EffectivePrimaryAction::SaveBeforeGit { unsaved_count } => {
-                let label = format!("先保存 {unsaved_count} 篇");
-                let tooltip = format!("执行 Git 操作前先保存 {unsaved_count} 篇未保存文章");
+                let label = i18n::text(UiMessage::GitSaveBeforeAction {
+                    count: unsaved_count,
+                });
+                let tooltip = i18n::text(UiMessage::GitSaveBeforeActionTooltip {
+                    count: unsaved_count,
+                });
                 self.publish_button.set_label(&label);
                 self.publish_button.set_tooltip_text(Some(&tooltip));
                 self.publish_button.set_sensitive(true);
             }
             EffectivePrimaryAction::Git(action) => {
-                self.publish_button.set_label(compact_action_label(action));
-                self.publish_button
-                    .set_tooltip_text(Some(action_label(action)));
+                let label = compact_action_label(action);
+                let tooltip = action_label(action);
+                self.publish_button.set_label(&label);
+                self.publish_button.set_tooltip_text(Some(&tooltip));
                 self.publish_button
                     .set_sensitive(action != PrimaryAction::None);
             }
@@ -477,29 +485,32 @@ pub(super) fn effective_primary_action(
     EffectivePrimaryAction::Git(recommended_action(snapshot))
 }
 
-fn action_label(action: PrimaryAction) -> &'static str {
-    match action {
-        PrimaryAction::None => "无需操作",
-        PrimaryAction::Initialize => "初始化 Git",
-        PrimaryAction::ConfigureIdentity => "配置提交身份",
-        PrimaryAction::Commit => "提交受管改动",
-        PrimaryAction::ConfigureRemote => "配置远端",
-        PrimaryAction::PushUpstream => "首次推送",
-        PrimaryAction::Push => "推送提交",
-        PrimaryAction::PullFastForward => "快进同步",
-    }
+fn action_label(action: PrimaryAction) -> String {
+    let message = match action {
+        PrimaryAction::None => UiMessage::GitActionNone,
+        PrimaryAction::Initialize => UiMessage::GitActionInitializeTooltip,
+        PrimaryAction::ConfigureIdentity => UiMessage::GitActionConfigureIdentityTooltip,
+        PrimaryAction::Commit => UiMessage::GitActionCommitTooltip,
+        PrimaryAction::ConfigureRemote => UiMessage::GitActionConfigureRemoteTooltip,
+        PrimaryAction::PushUpstream => UiMessage::GitActionPushUpstreamTooltip,
+        PrimaryAction::Push => UiMessage::GitActionPushTooltip,
+        PrimaryAction::PullFastForward => UiMessage::GitActionPullFastForwardTooltip,
+    };
+    i18n::text(message)
 }
 
-fn compact_action_label(action: PrimaryAction) -> &'static str {
-    match action {
-        PrimaryAction::None => "已同步",
-        PrimaryAction::Initialize => "初始化",
-        PrimaryAction::ConfigureIdentity => "身份",
-        PrimaryAction::Commit => "提交",
-        PrimaryAction::ConfigureRemote => "远端",
-        PrimaryAction::PushUpstream | PrimaryAction::Push => "推送",
-        PrimaryAction::PullFastForward => "同步",
-    }
+fn compact_action_label(action: PrimaryAction) -> String {
+    let message = match action {
+        PrimaryAction::None => UiMessage::GitNoAction,
+        PrimaryAction::Initialize => UiMessage::GitActionInitialize,
+        PrimaryAction::ConfigureIdentity => UiMessage::GitActionConfigureIdentity,
+        PrimaryAction::Commit => UiMessage::GitActionCommit,
+        PrimaryAction::ConfigureRemote => UiMessage::GitActionConfigureRemote,
+        PrimaryAction::PushUpstream => UiMessage::GitActionPushUpstream,
+        PrimaryAction::Push => UiMessage::GitActionPush,
+        PrimaryAction::PullFastForward => UiMessage::GitActionPullFastForward,
+    };
+    i18n::text(message)
 }
 
 fn status_label(text: &str) -> gtk::Label {

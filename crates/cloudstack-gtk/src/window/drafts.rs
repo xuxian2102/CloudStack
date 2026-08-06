@@ -10,6 +10,7 @@ use cloudstack_core::services::{drafts, posts};
 use cloudstack_core::AppError;
 
 use super::{set_busy, show_error, sync_controls, toast, EditorState, Widgets};
+use crate::i18n::{self, UiMessage};
 use crate::tasks;
 
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(700);
@@ -676,7 +677,7 @@ fn complete_batch_save(
             widgets.window.close();
             return true;
         }
-        toast(widgets, "未保存文章已保存，请继续执行 Git 操作");
+        toast(widgets, &i18n::text(UiMessage::BatchSaveSuccessContinueGit));
         return false;
     }
 

@@ -1,4 +1,5 @@
 mod app;
+mod i18n;
 mod preview;
 mod search;
 mod tasks;
@@ -16,6 +17,7 @@ fn main() -> gtk::glib::ExitCode {
     }
     // 应用没有 X11 运行契约；即使系统 GTK 同时编译了 X11 backend，也不允许回退。
     std::env::set_var("GDK_BACKEND", "wayland");
+    i18n::initialize();
 
     let application = adw::Application::builder()
         .application_id(APPLICATION_ID)
