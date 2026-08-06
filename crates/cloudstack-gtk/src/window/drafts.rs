@@ -130,6 +130,7 @@ enum Operation {
 
 enum Completion {
     Written {
+        context_root: PathBuf,
         post_id: String,
         result: Result<(), AppError>,
     },
@@ -140,6 +141,7 @@ enum Completion {
         result: Result<Option<DraftDocument>, AppError>,
     },
     Deleted {
+        context_root: PathBuf,
         post_id: String,
         result: Result<(), AppError>,
     },
@@ -170,7 +172,11 @@ impl Operation {
             } => {
                 let result =
                     storage.write(&context, &post_id, raw_frontmatter, body, base_revision);
-                Completion::Written { post_id, result }
+                Completion::Written {
+                    context_root: context.root,
+                    post_id,
+                    result,
+                }
             }
             Self::Read {
                 storage,
@@ -192,7 +198,11 @@ impl Operation {
                 post_id,
             } => {
                 let result = storage.delete(&context, &post_id);
-                Completion::Deleted { post_id, result }
+                Completion::Deleted {
+                    context_root: context.root,
+                    post_id,
+                    result,
+                }
             }
             Self::SaveAndClose {
                 storage,
@@ -552,13 +562,13 @@ fn handle_completion(
     completion: Completion,
 ) -> bool {
     match completion {
-        Completion::Written { post_id, result } => {
+        Completion::Written {
+            context_root,
+            post_id,
+            result,
+        } => {
             if let Err(error) = result {
-                let is_current = state
-                    .borrow()
-                    .document
-                    .as_ref()
-                    .is_some_and(|document| document.id == post_id);
+                let is_current = is_current_post(state, &context_root, &post_id);
                 if is_current {
                     show_error(widgets, &format!("自动保存草稿失败：{error}"));
                 }
@@ -584,13 +594,13 @@ fn handle_completion(
             }
             Err(_) => {}
         },
-        Completion::Deleted { post_id, result } => {
+        Completion::Deleted {
+            context_root,
+            post_id,
+            result,
+        } => {
             if let Err(error) = result {
-                let is_current = state
-                    .borrow()
-                    .document
-                    .as_ref()
-                    .is_some_and(|document| document.id == post_id);
+                let is_current = is_current_post(state, &context_root, &post_id);
                 if is_current {
                     show_error(widgets, &format!("清理自动恢复草稿失败：{error}"));
                 }
@@ -718,6 +728,22 @@ fn complete_discard(
     }
     show_error(widgets, &message);
     false
+}
+
+fn is_current_post(
+    state: &Rc<RefCell<EditorState>>,
+    context_root: &std::path::Path,
+    post_id: &str,
+) -> bool {
+    let state = state.borrow();
+    state
+        .project
+        .as_ref()
+        .is_some_and(|context| context.root == context_root)
+        && state
+            .document
+            .as_ref()
+            .is_some_and(|document| document.id == post_id)
 }
 
 fn can_offer_recovery(state: &Rc<RefCell<EditorState>>, post_id: &str, epoch: u64) -> bool {
@@ -930,6 +956,43 @@ mod tests {
         assert_eq!(report.failed.len(), 1);
         assert_eq!(report.failed[0].relative_path, "a.md");
         assert!(report.failed[0].error.contains("外部"));
+    }
+
+    #[test]
+    fn batch_save_keeps_success_and_failure_independent() {
+        let (project, _app_data, context, storage) = fixture();
+        std::fs::write(context.root.join("b.md"), "old b\n").unwrap();
+        let mut saved = posts::read_post(&context, "a.md").unwrap();
+        let mut failed = posts::read_post(&context, "b.md").unwrap();
+        saved.body = "new a\n".into();
+        failed.body = "new b\n".into();
+        drafts::write(
+            &storage.primary,
+            &context,
+            "b.md",
+            None,
+            failed.body.clone(),
+            failed.revision.clone(),
+        )
+        .unwrap();
+        std::fs::write(context.root.join("b.md"), "changed elsewhere\n").unwrap();
+
+        let report = save_documents(&storage, &context, vec![saved, failed]);
+
+        assert_eq!(report.saved.len(), 1);
+        assert_eq!(report.saved[0].id, "a.md");
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].relative_path, "b.md");
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("a.md")).unwrap(),
+            "new a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("b.md")).unwrap(),
+            "changed elsewhere\n"
+        );
+        assert!(storage.read(&context, "a.md").unwrap().is_none());
+        assert!(storage.read(&context, "b.md").unwrap().is_some());
     }
 
     #[test]

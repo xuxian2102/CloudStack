@@ -22,6 +22,34 @@ packaging/arch/         Arch VCS 包、desktop entry 和 Wayland 启动器
 待提交图片和串行草稿队列。GtkSourceView 只装载 Markdown 正文；原始 Frontmatter
 独立保存在 `PostDocument`，通过右侧抽屉做 lossless 字段更新，保存时才重新组装文件。
 
+窗口层中的几类状态判定已经收敛到可独立测试的 Rust 边界：
+
+- `app/save.rs` 负责比较 document id、document epoch 和 edit generation，分类异步保存
+  完成结果，并只在结果仍对应当前编辑版本时更新正文、revision 和未保存集合；
+- `app/settings.rs` 的 `SettingsWriter` 维护完整 `AppSettings` 快照，保证同一时刻只有
+  一个设置写盘任务，后续修改只保留最新 pending 快照，避免异步完成乱序覆盖新设置；
+- `ControlModel` 将 `EditorState` 映射为控件可用性，`EffectivePrimaryAction` 再把仓库建议
+  动作与 busy、未保存文章数量组合为 Git 面板当前主按钮动作。
+
+`window.rs` 只负责 GTK 事件编排、异步任务派发和模型渲染，不再承担上述纯状态判定。
+交互式保存、批量保存和关闭流程由全局 `busy` 保证单飞：busy 期间会禁用会触发新操作
+的控件和编辑器，因此当前不引入额外的 `SaveState`/`op_id` 状态机。若将来允许保存期间
+继续编辑或并行操作，再以实际竞态为依据增加操作代次，而不是预先扩大状态模型。
+
+### 草稿与批量保存审计结论
+
+`window/drafts.rs` 的 `DraftQueue` 使用 `active + pending` FIFO 队列串行执行草稿写入、
+删除、批量保存和放弃清理。自动保存产生的新快照会排在当前任务之后；保存成功后排入的
+草稿删除也会等待此前的写入完成，因此旧写入不会覆盖随后清理。批量保存按文章逐项生成
+结果：成功文章立即从 `unsaved_documents` 移除并清理对应草稿，失败文章保留，任何失败
+都会阻止关闭或继续 Git 操作。
+
+文章读取恢复回调同时检查 `document_epoch`、文章 ID、`busy` 和当前 dirty 状态。批量保存
+与放弃关闭流程在 `busy` 期间禁止项目切换和窗口关闭，旧项目的批量回调不会落到新项目。
+自动草稿写入和删除不占用全局 busy，项目切换可以与它们并行；这类任务只在失败时提示，
+其回调现在同时校验项目根路径和文章 ID，避免两个项目存在同名文章时把旧项目错误显示到
+新项目。当前没有证据表明需要引入更大的 Draft 状态机或操作 ID。
+
 所有磁盘与 Git 操作都通过 `gio::spawn_blocking` 离开 GTK 主线程。保存使用 revision
 比较和同目录原子替换；外部修改、路径穿越、符号链接逃逸和无效文章 ID 在 core 中
 拒绝。草稿写入与删除进入同一串行队列，防止旧自动保存覆盖正常保存后的清理。
