@@ -99,7 +99,7 @@ pub fn present(application: &adw::Application) {
     connect_post_list(&widgets, &state);
     connect_close_guard(&widgets, &state);
     recent::load_async(&widgets, &state);
-    settings::load_and_apply_async();
+    settings::load_and_initialize();
     recent::maybe_reopen_last_project(&widgets, &state);
 
     #[cfg(feature = "e2e")]
