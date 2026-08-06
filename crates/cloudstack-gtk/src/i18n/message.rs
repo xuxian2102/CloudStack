@@ -128,6 +128,26 @@ pub(crate) enum UiMessage {
     DayUnit,
     FieldTitle { name: String },
     RequiredFieldTitle { name: String },
+    DraftRecoveryAvailable { path: String },
+    DraftRecoveryDiskChanged { path: String },
+    DraftRecoveryHeading,
+    UseDiskVersion,
+    RecoverDraft,
+    CloseWhileBusy,
+    SavingUnsavedStatus,
+    DiscardingUnsavedStatus,
+    UnsavedDocumentsOnClose { count: usize, documents: String },
+    UnsavedDocumentOnClose { document: String },
+    UnsavedDocumentsHeading,
+    UnsavedDocumentHeading,
+    ContinueEditing,
+    DiscardAll,
+    SaveAll,
+    DiscardAndClose,
+    SaveAndClose,
+    BatchSaveFailed { details: String },
+    DiscardFailed { details: String },
+    RecoveredDraftStatus { path: String },
 }
 
 impl UiMessage {
@@ -255,6 +275,26 @@ impl UiMessage {
             Self::DayUnit => "day-unit",
             Self::FieldTitle { .. } => "field-title",
             Self::RequiredFieldTitle { .. } => "required-field-title",
+            Self::DraftRecoveryAvailable { .. } => "draft-recovery-available",
+            Self::DraftRecoveryDiskChanged { .. } => "draft-recovery-disk-changed",
+            Self::DraftRecoveryHeading => "draft-recovery-heading",
+            Self::UseDiskVersion => "use-disk-version",
+            Self::RecoverDraft => "recover-draft",
+            Self::CloseWhileBusy => "close-while-busy",
+            Self::SavingUnsavedStatus => "saving-unsaved-status",
+            Self::DiscardingUnsavedStatus => "discarding-unsaved-status",
+            Self::UnsavedDocumentsOnClose { .. } => "unsaved-documents-on-close",
+            Self::UnsavedDocumentOnClose { .. } => "unsaved-document-on-close",
+            Self::UnsavedDocumentsHeading => "unsaved-documents-heading",
+            Self::UnsavedDocumentHeading => "unsaved-document-heading",
+            Self::ContinueEditing => "continue-editing",
+            Self::DiscardAll => "discard-all",
+            Self::SaveAll => "save-all",
+            Self::DiscardAndClose => "discard-and-close",
+            Self::SaveAndClose => "save-and-close",
+            Self::BatchSaveFailed { .. } => "batch-save-failed",
+            Self::DiscardFailed { .. } => "discard-failed",
+            Self::RecoveredDraftStatus { .. } => "recovered-draft-status",
         }
     }
 
@@ -289,6 +329,22 @@ impl UiMessage {
             }
             Self::FieldTitle { name } | Self::RequiredFieldTitle { name } => {
                 HashMap::from([(Cow::Borrowed("name"), FluentValue::from(name.clone()))])
+            }
+            Self::DraftRecoveryAvailable { path }
+            | Self::DraftRecoveryDiskChanged { path }
+            | Self::UnsavedDocumentOnClose { document: path }
+            | Self::RecoveredDraftStatus { path } => {
+                HashMap::from([(Cow::Borrowed("path"), FluentValue::from(path.clone()))])
+            }
+            Self::UnsavedDocumentsOnClose { count, documents } => HashMap::from([
+                (Cow::Borrowed("count"), FluentValue::from(*count)),
+                (
+                    Cow::Borrowed("documents"),
+                    FluentValue::from(documents.clone()),
+                ),
+            ]),
+            Self::BatchSaveFailed { details } | Self::DiscardFailed { details } => {
+                HashMap::from([(Cow::Borrowed("details"), FluentValue::from(details.clone()))])
             }
             _ => return None,
         };
@@ -438,6 +494,41 @@ pub(crate) fn message_samples() -> Vec<UiMessage> {
         },
         UiMessage::RequiredFieldTitle {
             name: "title".to_owned(),
+        },
+        UiMessage::DraftRecoveryAvailable {
+            path: "notes/example.md".to_owned(),
+        },
+        UiMessage::DraftRecoveryDiskChanged {
+            path: "notes/example.md".to_owned(),
+        },
+        UiMessage::DraftRecoveryHeading,
+        UiMessage::UseDiskVersion,
+        UiMessage::RecoverDraft,
+        UiMessage::CloseWhileBusy,
+        UiMessage::SavingUnsavedStatus,
+        UiMessage::DiscardingUnsavedStatus,
+        UiMessage::UnsavedDocumentsOnClose {
+            count: 2,
+            documents: "notes/a.md\nnotes/b.md".to_owned(),
+        },
+        UiMessage::UnsavedDocumentOnClose {
+            document: "notes/a.md".to_owned(),
+        },
+        UiMessage::UnsavedDocumentsHeading,
+        UiMessage::UnsavedDocumentHeading,
+        UiMessage::ContinueEditing,
+        UiMessage::DiscardAll,
+        UiMessage::SaveAll,
+        UiMessage::DiscardAndClose,
+        UiMessage::SaveAndClose,
+        UiMessage::BatchSaveFailed {
+            details: "notes/a.md：error".to_owned(),
+        },
+        UiMessage::DiscardFailed {
+            details: "notes/a.md：error".to_owned(),
+        },
+        UiMessage::RecoveredDraftStatus {
+            path: "notes/a.md".to_owned(),
         },
     ]
 }

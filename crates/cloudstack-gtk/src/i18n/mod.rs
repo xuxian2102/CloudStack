@@ -142,6 +142,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn formats_draft_and_close_messages_with_parameters() {
+        let recovery = UiMessage::DraftRecoveryAvailable {
+            path: "notes/example.md".to_owned(),
+        };
+        let recovery_args = recovery.args().unwrap();
+        let recovery_text =
+            LOCALES.lookup_with_args(&langid!("en-US"), recovery.id(), &recovery_args);
+        assert!(recovery_text.contains("notes/example.md"));
+
+        let close = UiMessage::UnsavedDocumentsOnClose {
+            count: 2,
+            documents: "notes/a.md\nnotes/b.md".to_owned(),
+        };
+        let close_args = close.args().unwrap();
+        let close_text = LOCALES.lookup_with_args(&langid!("zh-CN"), close.id(), &close_args);
+        assert!(close_text.contains("2"));
+        assert!(close_text.contains("notes/a.md"));
+        assert!(close_text.contains("notes/b.md"));
+    }
+
     fn strip_bidi_isolates(text: &str) -> String {
         text.chars()
             .filter(|character| !matches!(character, '\u{2068}' | '\u{2069}'))

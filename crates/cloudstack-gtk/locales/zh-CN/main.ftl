@@ -128,3 +128,26 @@ month-unit = 月
 day-unit = 日
 field-title = { $name }
 required-field-title = { $name } · 必填
+draft-recovery-available = { $path } 存在上次未正常保存的编辑内容。
+draft-recovery-disk-changed = { $path } 存在自动恢复草稿，但磁盘文章之后可能又被修改过。恢复后请检查内容再保存。
+draft-recovery-heading = 恢复自动保存的草稿？
+use-disk-version = 使用磁盘版本
+recover-draft = 恢复草稿
+close-while-busy = 文件操作正在进行，请稍候再关闭
+saving-unsaved-status = 正在保存未保存文章…
+discarding-unsaved-status = 正在放弃未保存文章…
+unsaved-documents-on-close = 关闭窗口前请选择如何处理 { $count } 篇未保存文章：
+    { $documents }
+unsaved-document-on-close = 文章“{ $path }”尚未保存。关闭窗口前请选择如何处理它。
+unsaved-documents-heading = 有多篇文章尚未保存
+unsaved-document-heading = 文章尚未保存
+continue-editing = 继续编辑
+discard-all = 全部不保存
+save-all = 保存全部
+discard-and-close = 不保存并关闭
+save-and-close = 保存并关闭
+batch-save-failed = 以下文章保存失败，窗口保持打开：
+    { $details }
+discard-failed = 以下文章的自动恢复草稿未能清理，窗口保持打开：
+    { $details }
+recovered-draft-status = { $path } · 已恢复草稿，未保存

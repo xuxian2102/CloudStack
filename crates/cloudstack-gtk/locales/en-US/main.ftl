@@ -136,3 +136,26 @@ month-unit = month
 day-unit = day
 field-title = { $name }
 required-field-title = { $name } · Required
+draft-recovery-available = { $path } has edits from a previous unsaved session.
+draft-recovery-disk-changed = { $path } has a recovery draft, but the disk file may have changed since then. Check the content before saving.
+draft-recovery-heading = Recover autosaved draft?
+use-disk-version = Use Disk Version
+recover-draft = Recover Draft
+close-while-busy = A file operation is in progress. Please wait before closing.
+saving-unsaved-status = Saving unsaved articles…
+discarding-unsaved-status = Discarding unsaved articles…
+unsaved-documents-on-close = Choose what to do with { $count } unsaved articles before closing:
+    { $documents }
+unsaved-document-on-close = Article “{ $path }” is not saved. Choose what to do with it before closing.
+unsaved-documents-heading = Unsaved articles
+unsaved-document-heading = Unsaved article
+continue-editing = Continue Editing
+discard-all = Discard All
+save-all = Save All
+discard-and-close = Discard and Close
+save-and-close = Save and Close
+batch-save-failed = The following articles could not be saved; the window will remain open:
+    { $details }
+discard-failed = Recovery drafts for the following articles could not be removed; the window will remain open:
+    { $details }
+recovered-draft-status = { $path } · Recovered draft, unsaved

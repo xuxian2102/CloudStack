@@ -1559,7 +1559,7 @@ fn connect_close_guard(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     let state = Rc::clone(state);
     widgets.window.clone().connect_close_request(move |_| {
         if state.borrow().busy {
-            toast(&widgets, "文件操作正在进行，请稍候再关闭");
+            toast(&widgets, &i18n::text(UiMessage::CloseWhileBusy));
             return glib::Propagation::Stop;
         }
         if !has_unsaved_documents(&state) {
@@ -1581,25 +1581,20 @@ fn connect_close_guard(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
         };
         let multiple = unsaved_documents.len() > 1;
         let body = if multiple {
-            format!(
-                "关闭窗口前请选择如何处理 {} 篇未保存文章：\n{}",
-                unsaved_documents.len(),
-                unsaved_documents.join("\n")
-            )
+            i18n::text(UiMessage::UnsavedDocumentsOnClose {
+                count: unsaved_documents.len(),
+                documents: unsaved_documents.join("\n"),
+            })
         } else {
-            format!(
-                "文章“{}”尚未保存。关闭窗口前请选择如何处理它。",
-                unsaved_documents
-                    .first()
-                    .map(String::as_str)
-                    .unwrap_or("当前文章")
-            )
+            i18n::text(UiMessage::UnsavedDocumentOnClose {
+                document: unsaved_documents.first().cloned().unwrap_or_default(),
+            })
         };
         let dialog = adw::AlertDialog::builder()
             .heading(if multiple {
-                "有多篇文章尚未保存"
+                i18n::text(UiMessage::UnsavedDocumentsHeading)
             } else {
-                "文章尚未保存"
+                i18n::text(UiMessage::UnsavedDocumentHeading)
             })
             .body(body)
             .default_response("cancel")
@@ -1607,15 +1602,15 @@ fn connect_close_guard(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
             .build();
         if multiple {
             dialog.add_responses(&[
-                ("cancel", "继续编辑"),
-                ("discard", "全部不保存"),
-                ("save", "保存全部"),
+                ("cancel", i18n::text(UiMessage::ContinueEditing).as_str()),
+                ("discard", i18n::text(UiMessage::DiscardAll).as_str()),
+                ("save", i18n::text(UiMessage::SaveAll).as_str()),
             ]);
         } else {
             dialog.add_responses(&[
-                ("cancel", "取消"),
-                ("discard", "不保存并关闭"),
-                ("save", "保存并关闭"),
+                ("cancel", i18n::text(UiMessage::Cancel).as_str()),
+                ("discard", i18n::text(UiMessage::DiscardAndClose).as_str()),
+                ("save", i18n::text(UiMessage::SaveAndClose).as_str()),
             ]);
         }
         dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);

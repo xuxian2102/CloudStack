@@ -372,7 +372,8 @@ pub(super) fn save_and_close(widgets: &Widgets, state: &Rc<RefCell<EditorState>>
         return;
     }
 
-    set_busy(widgets, state, true, "正在保存未保存文章…");
+    let busy_message = i18n::text(UiMessage::SavingUnsavedStatus);
+    set_busy(widgets, state, true, &busy_message);
     enqueue(
         widgets,
         state,
@@ -407,7 +408,8 @@ pub(super) fn save_all(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
         return;
     }
 
-    set_busy(widgets, state, true, "正在保存未保存文章…");
+    let busy_message = i18n::text(UiMessage::SavingUnsavedStatus);
+    set_busy(widgets, state, true, &busy_message);
     enqueue(
         widgets,
         state,
@@ -445,7 +447,8 @@ pub(super) fn discard_and_close(widgets: &Widgets, state: &Rc<RefCell<EditorStat
     if let Err(error) = state.borrow_mut().pending_assets.discard_all() {
         log::warn!("退出时清理待提交图片失败：{error}");
     }
-    set_busy(widgets, state, true, "正在放弃未保存文章…");
+    let busy_message = i18n::text(UiMessage::DiscardingUnsavedStatus);
+    set_busy(widgets, state, true, &busy_message);
     enqueue(
         widgets,
         state,
@@ -682,14 +685,16 @@ fn complete_batch_save(
     }
 
     set_busy(widgets, state, false, "");
-    let mut message = String::from("以下文章保存失败，窗口保持打开：");
-    for failure in &report.failed {
-        message.push_str(&format!("\n{}：{}", failure.relative_path, failure.error));
-    }
+    let details = report
+        .failed
+        .iter()
+        .map(|failure| format!("{}：{}", failure.relative_path, failure.error))
+        .collect::<Vec<_>>()
+        .join("\n");
     if !report.cleanup_warnings.is_empty() {
         log::warn!("{}", report.cleanup_warnings.join("；"));
     }
-    show_error(widgets, &message);
+    show_error(widgets, &i18n::text(UiMessage::BatchSaveFailed { details }));
     false
 }
 
@@ -723,11 +728,13 @@ fn complete_discard(
     }
 
     set_busy(widgets, state, false, "");
-    let mut message = String::from("以下文章的自动恢复草稿未能清理，窗口保持打开：");
-    for failure in &report.failed {
-        message.push_str(&format!("\n{}：{}", failure.relative_path, failure.error));
-    }
-    show_error(widgets, &message);
+    let details = report
+        .failed
+        .iter()
+        .map(|failure| format!("{}：{}", failure.relative_path, failure.error))
+        .collect::<Vec<_>>()
+        .join("\n");
+    show_error(widgets, &i18n::text(UiMessage::DiscardFailed { details }));
     false
 }
 
@@ -767,20 +774,24 @@ fn show_recovery_dialog(
     epoch: u64,
 ) {
     let body = if draft.base_revision == document.revision {
-        format!("{} 存在上次未正常保存的编辑内容。", document.relative_path)
+        i18n::text(UiMessage::DraftRecoveryAvailable {
+            path: document.relative_path.clone(),
+        })
     } else {
-        format!(
-            "{} 存在自动恢复草稿，但磁盘文章之后可能又被修改过。恢复后请检查内容再保存。",
-            document.relative_path
-        )
+        i18n::text(UiMessage::DraftRecoveryDiskChanged {
+            path: document.relative_path.clone(),
+        })
     };
     let dialog = adw::AlertDialog::builder()
-        .heading("恢复自动保存的草稿？")
+        .heading(i18n::text(UiMessage::DraftRecoveryHeading))
         .body(body)
         .default_response("restore")
         .close_response("later")
         .build();
-    dialog.add_responses(&[("disk", "使用磁盘版本"), ("restore", "恢复草稿")]);
+    dialog.add_responses(&[
+        ("disk", i18n::text(UiMessage::UseDiskVersion).as_str()),
+        ("restore", i18n::text(UiMessage::RecoverDraft).as_str()),
+    ]);
     dialog.set_response_appearance("disk", adw::ResponseAppearance::Destructive);
     dialog.set_response_appearance("restore", adw::ResponseAppearance::Suggested);
 
@@ -805,10 +816,11 @@ fn show_recovery_dialog(
             state.dirty = true;
         }
         super::mark_document_dirty(&restore_widgets, &restore_state);
-        restore_widgets.status_label.set_label(&format!(
-            "{} · 已恢复草稿，未保存",
-            restore_document.relative_path
-        ));
+        restore_widgets
+            .status_label
+            .set_label(&i18n::text(UiMessage::RecoveredDraftStatus {
+                path: restore_document.relative_path.clone(),
+            }));
         restore_widgets.preview.schedule(draft.body.clone(), true);
         sync_controls(&restore_widgets, &restore_state);
         super::frontmatter::refresh(&restore_widgets, &restore_state);
