@@ -2,39 +2,38 @@
 //! 未保存快照、Git 快照、dirty/busy 和三个 generation 计数器。从
 //! `cloudstack-gtk` 的 `EditorState` 机械迁移过来（第 9A 轮）。
 //!
-//! 字段目前都是 `pub`——第 9A 轮只搬字段、不新增状态转换逻辑。第 9B 轮按
-//! "workspace 生命周期 → document 生命周期 → save/dirty 生命周期"三个语义簇
-//! 分批把状态转换方法加回 `WorkspaceSession`；本文件现在三簇都有了。字段
-//! 暂时仍然全部保持 `pub`——按用户的决定，`git_refresh_generation` 属于 9C
-//! （Git 刷新 request/completion 收进 Session 时才处理），9B 结束后不提前
-//! 私有化它；其余 9 个字段等 9C 一起把 `git_refresh_generation` 收进方法后，
-//! 再一次性全部私有化，避免出现"半私有 API"的中间状态。
+//! 第 9A 轮只搬字段、不新增状态转换逻辑；第 9B 轮按"workspace 生命周期 →
+//! document 生命周期 → save/dirty 生命周期"三个语义簇把状态转换方法加回
+//! `WorkspaceSession`；第 9C 轮把剩下的 Git 刷新 request/completion
+//! （[`WorkspaceSession::begin_git_refresh`]/[`WorkspaceSession::apply_git_snapshot`]）、
+//! `busy`（[`WorkspaceSession::set_busy`]）和控件能力计算
+//! （[`WorkspaceSession::capabilities`]）也收进方法，并把全部字段私有化，
+//! 只留只读 getter 对外。GTK 现在不再直接读写任何字段。
 
 use std::collections::HashMap;
 
 use cloudstack_core::model::{PostDocument, PostSummary, ProjectContext, RepositorySnapshot};
 
+use crate::controls::{capabilities_for, WorkspaceCapabilities, WorkspaceCapabilitiesInput};
+use crate::git_refresh::should_apply_git_refresh;
 use crate::save::{apply_successful_save, classify_save_completion, SaveCompletionOutcome};
 
-/// Transitional field visibility for the 9A mechanical migration.
-/// These fields remain public only until state transitions move behind
-/// WorkspaceSession methods in 9B.
 #[derive(Default)]
 pub struct WorkspaceSession {
-    pub project: Option<ProjectContext>,
-    pub posts: Vec<PostSummary>,
-    pub document: Option<PostDocument>,
-    pub dirty: bool,
-    pub busy: bool,
-    pub document_epoch: u64,
+    project: Option<ProjectContext>,
+    posts: Vec<PostSummary>,
+    document: Option<PostDocument>,
+    dirty: bool,
+    busy: bool,
+    document_epoch: u64,
     /// 每次 mark_document_dirty 自增一次，用来在保存完成时判断保存期间
     /// buffer 有没有被再次修改。
-    pub edit_generation: u64,
-    pub git_snapshot: Option<RepositorySnapshot>,
+    edit_generation: u64,
+    git_snapshot: Option<RepositorySnapshot>,
     /// 每次触发 Git 状态刷新时自增，防止后台线程池乱序完成时旧请求覆盖新状态。
-    pub git_refresh_generation: u64,
+    git_refresh_generation: u64,
     /// 当前会话中已修改但尚未写回磁盘的文章快照。允许切换文章时保留编辑内容。
-    pub unsaved_documents: HashMap<String, PostDocument>,
+    unsaved_documents: HashMap<String, PostDocument>,
 }
 
 /// [`WorkspaceSession::install_workspace`] 的结果：GTK 只需要新的
@@ -69,6 +68,16 @@ pub struct DocumentCleared {
 pub struct DocumentDirty {
     pub post_id: String,
     pub edit_generation: u64,
+}
+
+/// [`WorkspaceSession::begin_git_refresh`] 的结果：GTK 拿 `context` 去后台
+/// 执行 `git::snapshot`，完成时把这份 request 原样传回
+/// [`WorkspaceSession::apply_git_snapshot`]/[`WorkspaceSession::is_git_refresh_current`]
+/// 校验它是不是还对应当前项目会话。
+#[derive(Debug, Clone)]
+pub struct GitRefreshRequest {
+    pub context: ProjectContext,
+    pub generation: u64,
 }
 
 impl WorkspaceSession {
@@ -119,6 +128,22 @@ impl WorkspaceSession {
     /// 不在这个方法里做。
     pub fn replace_posts(&mut self, posts: Vec<PostSummary>) {
         self.posts = posts;
+    }
+
+    /// 一次 Git 操作（比如发布）可能会返回更新过的 `ProjectContext`（例如
+    /// exclude 配置被顺带写入）。只有这份 context 仍然对应当前打开的项目
+    /// （root 匹配）才安装，返回是否真的替换了——异步操作飞行期间项目可能
+    /// 已经被切换或关闭，那种情况下这份 context 已经过期，不该覆盖。不改变
+    /// `posts`/`document`/`dirty` 等其他字段。
+    pub fn replace_project_context(&mut self, context: ProjectContext) -> bool {
+        let matches = self
+            .project
+            .as_ref()
+            .is_some_and(|current| current.root == context.root);
+        if matches {
+            self.project = Some(context);
+        }
+        matches
     }
 
     /// 切换到（或首次安装）一篇文档：`dirty` 总是显式取调用方传入的值，
@@ -266,6 +291,119 @@ impl WorkspaceSession {
             .as_deref()
             .is_some_and(|post_id| self.unsaved_documents.contains_key(post_id));
     }
+
+    /// 写入 `busy`。状态本身只是一个布尔字段；根据 busy 决定展示哪条状态栏
+    /// 文案（读取 `document`/`dirty`/`project`/`posts` 来选择本地化文案）
+    /// 是 presentation 决策，留在 GTK 的 `set_busy()` 里，只是改成通过这里
+    /// 的只读 getter 读取状态，不再直接碰字段。
+    pub fn set_busy(&mut self, busy: bool) {
+        self.busy = busy;
+    }
+
+    /// 从当前状态一次性算出所有控件的可用性，取代 GTK 手工拼
+    /// `WorkspaceCapabilitiesInput` 再调用 `capabilities_for()`。
+    pub fn capabilities(&self) -> WorkspaceCapabilities {
+        capabilities_for(WorkspaceCapabilitiesInput {
+            has_project: self.project.is_some(),
+            has_document: self.document.is_some(),
+            unsaved_document_count: self.unsaved_documents.len(),
+            busy: self.busy,
+            dirty: self.dirty,
+            git_snapshot: self.git_snapshot.as_ref(),
+        })
+    }
+
+    /// 发起一次 Git 状态刷新：没有打开的项目时清空 `git_snapshot`（不需要
+    /// 刷新，也不该留着上一个项目的快照）并返回 `None`；否则推进
+    /// `git_refresh_generation`，返回携带当前项目 `context` 和新 generation
+    /// 的 request，调用方拿 `context` 去后台执行 `git::snapshot`。
+    pub fn begin_git_refresh(&mut self) -> Option<GitRefreshRequest> {
+        let Some(context) = self.project.clone() else {
+            self.git_snapshot = None;
+            return None;
+        };
+        self.git_refresh_generation = self.git_refresh_generation.wrapping_add(1);
+        Some(GitRefreshRequest {
+            context,
+            generation: self.git_refresh_generation,
+        })
+    }
+
+    /// 一次 Git 刷新 completion 是否仍然对应当前项目会话——后台线程池不
+    /// 保证完成顺序，同一项目连续触发两次刷新时，先发出的请求可能后完成；
+    /// 项目也可能在请求飞行期间被切换或关闭。校验 root 和 generation 双重
+    /// 匹配，复用 [`crate::git_refresh::should_apply_git_refresh`]。
+    pub fn is_git_refresh_current(&self, request: &GitRefreshRequest) -> bool {
+        should_apply_git_refresh(
+            self.project.as_ref().map(|context| context.root.as_path()),
+            &request.context.root,
+            self.git_refresh_generation,
+            request.generation,
+        )
+    }
+
+    /// Git 刷新成功完成时调用：只有请求仍然是当前会话的才安装
+    /// `git_snapshot`，返回是否真的安装了（GTK 据此决定要不要把结果渲染
+    /// 进面板）；已经过期的请求什么都不做。
+    pub fn apply_git_snapshot(
+        &mut self,
+        request: &GitRefreshRequest,
+        snapshot: RepositorySnapshot,
+    ) -> bool {
+        if !self.is_git_refresh_current(request) {
+            return false;
+        }
+        self.git_snapshot = Some(snapshot);
+        true
+    }
+
+    pub fn project(&self) -> Option<&ProjectContext> {
+        self.project.as_ref()
+    }
+
+    pub fn posts(&self) -> &[PostSummary] {
+        &self.posts
+    }
+
+    pub fn document(&self) -> Option<&PostDocument> {
+        self.document.as_ref()
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.dirty
+    }
+
+    pub fn busy(&self) -> bool {
+        self.busy
+    }
+
+    pub fn document_epoch(&self) -> u64 {
+        self.document_epoch
+    }
+
+    pub fn edit_generation(&self) -> u64 {
+        self.edit_generation
+    }
+
+    pub fn git_snapshot(&self) -> Option<&RepositorySnapshot> {
+        self.git_snapshot.as_ref()
+    }
+
+    pub fn unsaved_document_count(&self) -> usize {
+        self.unsaved_documents.len()
+    }
+
+    pub fn has_unsaved_documents(&self) -> bool {
+        !self.unsaved_documents.is_empty()
+    }
+
+    pub fn unsaved_document(&self, post_id: &str) -> Option<&PostDocument> {
+        self.unsaved_documents.get(post_id)
+    }
+
+    pub fn unsaved_documents(&self) -> impl Iterator<Item = &PostDocument> {
+        self.unsaved_documents.values()
+    }
 }
 
 #[cfg(test)]
@@ -375,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn close_workspace_is_idempotent_when_already_empty() {
+    fn close_workspace_when_empty_stays_empty_and_advances_epoch() {
         let mut session = WorkspaceSession::default();
         let closed = session.close_workspace();
         assert_eq!(closed.document_epoch, 1);
@@ -397,6 +535,58 @@ mod tests {
         );
         assert!(session.dirty);
         assert_eq!(session.document_epoch, starting_epoch);
+    }
+
+    #[test]
+    fn replace_project_context_replaces_when_root_matches() {
+        let mut session = clean_session_with_document();
+        let starting_document_id = session.document.as_ref().map(|d| d.id.clone());
+        let starting_dirty = session.dirty;
+        let starting_epoch = session.document_epoch;
+        let starting_unsaved_count = session.unsaved_documents.len();
+
+        let mut updated = context("/tmp/project");
+        updated.config_path = "/tmp/project/.blog-editor.json".into();
+        let replaced = session.replace_project_context(updated.clone());
+
+        assert!(replaced);
+        assert_eq!(
+            session.project.as_ref().map(|c| c.config_path.clone()),
+            Some(updated.config_path)
+        );
+        // 同一个 workspace 的 context 被重新写入配置后更新，不是打开新
+        // workspace，不该碰其他任何字段。
+        assert_eq!(
+            session.document.as_ref().map(|d| d.id.clone()),
+            starting_document_id
+        );
+        assert_eq!(session.dirty, starting_dirty);
+        assert_eq!(session.document_epoch, starting_epoch);
+        assert_eq!(session.unsaved_documents.len(), starting_unsaved_count);
+    }
+
+    #[test]
+    fn replace_project_context_rejects_a_different_root() {
+        let mut session = clean_session_with_document();
+        let other = context("/tmp/other");
+
+        let replaced = session.replace_project_context(other);
+
+        assert!(!replaced);
+        assert_eq!(
+            session.project.as_ref().map(|c| c.root.clone()),
+            Some("/tmp/project".into())
+        );
+    }
+
+    #[test]
+    fn replace_project_context_rejects_without_a_project() {
+        let mut session = WorkspaceSession::default();
+
+        let replaced = session.replace_project_context(context("/tmp/project"));
+
+        assert!(!replaced);
+        assert!(session.project.is_none());
     }
 
     #[test]
@@ -737,5 +927,121 @@ mod tests {
 
     fn post_ids(posts: &[PostSummary]) -> Vec<&str> {
         posts.iter().map(|post| post.id.as_str()).collect()
+    }
+
+    fn snapshot() -> cloudstack_core::model::RepositorySnapshot {
+        use cloudstack_core::model::{
+            GitEnvironment, GitStatus, RepositoryTopology, SyncRelation, WorktreeState,
+        };
+        cloudstack_core::model::RepositorySnapshot {
+            environment: GitEnvironment::default(),
+            identity: None,
+            topology: RepositoryTopology::NotInitialized,
+            sync: SyncRelation::Unknown,
+            worktree: WorktreeState::default(),
+            remotes: Vec::new(),
+            config_tracked: false,
+            status: GitStatus {
+                branch: None,
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                changes: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn set_busy_updates_the_busy_flag() {
+        let mut session = WorkspaceSession::default();
+        assert!(!session.busy());
+        session.set_busy(true);
+        assert!(session.busy());
+        session.set_busy(false);
+        assert!(!session.busy());
+    }
+
+    #[test]
+    fn capabilities_reflects_current_state() {
+        let mut session = clean_session_with_document();
+        // 干净、不忙、有当前文档：保存按钮应该禁用（没有改动可保存）。
+        assert!(!session.capabilities().save_enabled);
+
+        session.mark_document_dirty("edited".into());
+        assert!(
+            session.capabilities().save_enabled,
+            "dirty 之后 capabilities() 必须反映最新状态"
+        );
+
+        session.set_busy(true);
+        assert!(
+            !session.capabilities().save_enabled,
+            "忙碌时即使 dirty 也不能保存"
+        );
+    }
+
+    #[test]
+    fn begin_git_refresh_returns_none_and_clears_snapshot_without_a_project() {
+        let mut session = WorkspaceSession {
+            git_snapshot: Some(snapshot()),
+            ..Default::default()
+        };
+
+        assert!(session.begin_git_refresh().is_none());
+        assert!(session.git_snapshot().is_none());
+    }
+
+    #[test]
+    fn begin_git_refresh_advances_generation_and_captures_current_context() {
+        let mut session = clean_session_with_document();
+        let starting_generation = session.git_refresh_generation;
+
+        let request = session
+            .begin_git_refresh()
+            .expect("project is open, refresh should start");
+
+        assert_eq!(request.generation, starting_generation.wrapping_add(1));
+        assert_eq!(session.git_refresh_generation, request.generation);
+        assert_eq!(
+            request.context.root,
+            session.project().unwrap().root.clone()
+        );
+    }
+
+    #[test]
+    fn apply_git_snapshot_installs_when_request_is_current() {
+        let mut session = clean_session_with_document();
+        let request = session.begin_git_refresh().unwrap();
+
+        let applied = session.apply_git_snapshot(&request, snapshot());
+
+        assert!(applied);
+        assert!(session.git_snapshot().is_some());
+    }
+
+    #[test]
+    fn apply_git_snapshot_rejects_a_stale_generation() {
+        let mut session = clean_session_with_document();
+        let stale_request = session.begin_git_refresh().unwrap();
+        // 同一个项目又触发了一次刷新，generation 已经推进。
+        session.begin_git_refresh().unwrap();
+
+        let applied = session.apply_git_snapshot(&stale_request, snapshot());
+
+        assert!(!applied, "过期 generation 的刷新结果不能被安装");
+        assert!(session.git_snapshot().is_none());
+    }
+
+    #[test]
+    fn apply_git_snapshot_rejects_after_project_switched() {
+        let mut session = clean_session_with_document();
+        let request = session.begin_git_refresh().unwrap();
+        // 刷新还没完成，用户已经切换到了另一个项目。
+        session.install_workspace(context("/tmp/another"), Vec::new());
+
+        let applied = session.apply_git_snapshot(&request, snapshot());
+
+        assert!(!applied, "项目已经切换，旧项目的刷新结果不能被安装");
+        assert!(session.git_snapshot().is_none());
     }
 }

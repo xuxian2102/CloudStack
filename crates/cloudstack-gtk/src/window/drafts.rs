@@ -88,15 +88,14 @@ pub(super) fn save_and_close(widgets: &Widgets, state: &Rc<RefCell<EditorState>>
     cancel_timer(state);
     let (context, mut documents) = {
         let state = state.borrow();
-        let Some(context) = &state.session.project else {
+        let Some(context) = state.session.project() else {
             return widgets.window.close();
         };
         (
             context.clone(),
             state
                 .session
-                .unsaved_documents
-                .values()
+                .unsaved_documents()
                 .cloned()
                 .collect::<Vec<_>>(),
         )
@@ -127,15 +126,14 @@ pub(super) fn save_all(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     cancel_timer(state);
     let (context, mut documents) = {
         let state = state.borrow();
-        let Some(context) = &state.session.project else {
+        let Some(context) = state.session.project() else {
             return;
         };
         (
             context.clone(),
             state
                 .session
-                .unsaved_documents
-                .values()
+                .unsaved_documents()
                 .cloned()
                 .collect::<Vec<_>>(),
         )
@@ -162,15 +160,14 @@ pub(super) fn discard_and_close(widgets: &Widgets, state: &Rc<RefCell<EditorStat
     cancel_timer(state);
     let (context, mut documents) = {
         let state = state.borrow();
-        let Some(context) = &state.session.project else {
+        let Some(context) = state.session.project() else {
             return widgets.window.close();
         };
         (
             context.clone(),
             state
                 .session
-                .unsaved_documents
-                .values()
+                .unsaved_documents()
                 .cloned()
                 .collect::<Vec<_>>(),
         )
@@ -207,10 +204,10 @@ fn cancel_timer(state: &Rc<RefCell<EditorState>>) {
 fn enqueue_current_snapshot(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     let (context, document, raw_frontmatter) = {
         let state = state.borrow();
-        if !state.session.dirty {
+        if !state.session.dirty() {
             return;
         }
-        let (Some(context), Some(document)) = (&state.session.project, &state.session.document)
+        let (Some(context), Some(document)) = (state.session.project(), state.session.document())
         else {
             return;
         };
@@ -408,8 +405,7 @@ fn complete_batch_save(
     let project_root = state
         .borrow()
         .session
-        .project
-        .as_ref()
+        .project()
         .map(|context| context.root.clone());
     {
         let mut editor_state = state.borrow_mut();
@@ -514,14 +510,12 @@ fn is_current_post(
         expected_project_root: context_root,
         current_project_root: state
             .session
-            .project
-            .as_ref()
+            .project()
             .map(|context| context.root.as_path()),
         expected_post_id: post_id,
         current_post_id: state
             .session
-            .document
-            .as_ref()
+            .document()
             .map(|document| document.id.as_str()),
     })
 }
@@ -534,22 +528,20 @@ fn can_offer_recovery(
 ) -> bool {
     let state = state.borrow();
     drafts::can_offer_recovery(DraftRecoveryEligibilityInput {
-        busy: state.session.busy,
-        dirty: state.session.dirty,
+        busy: state.session.busy(),
+        dirty: state.session.dirty(),
         expected_project_root: project_root,
         current_project_root: state
             .session
-            .project
-            .as_ref()
+            .project()
             .map(|context| context.root.as_path()),
         expected_post_id: post_id,
         current_post_id: state
             .session
-            .document
-            .as_ref()
+            .document()
             .map(|document| document.id.as_str()),
         expected_epoch: epoch,
-        current_epoch: state.session.document_epoch,
+        current_epoch: state.session.document_epoch(),
     })
 }
 

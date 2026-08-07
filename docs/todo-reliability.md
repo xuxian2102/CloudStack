@@ -220,7 +220,7 @@ fn on_save_clicked(...) {
 
 ## 后续路线：WorkspaceSession → 无损文本合同 → Live Preview（用户提出，2026-08-07，application-layer 第一阶段收尾后）
 
-**状态：阶段 9（9A）已完成；9B 的三个生命周期簇（workspace/document/save-dirty）全部完成，9B 收尾。9C 及阶段 10～14 尚未开始。**
+**状态：阶段 9 全部完成（9A/9B/9C）。`WorkspaceSession` 十个字段已全部私有化，`cloudstack-gtk` 不再直接读写任何一个，只通过方法和只读 getter。阶段 10～14 尚未开始。**
 
 顺序固定，不要跳步：
 
@@ -296,7 +296,25 @@ rg '\.session\.unsaved_documents\.(insert|remove|clear)' crates/cloudstack-gtk
 
 至此 9B 三个生命周期簇全部完成。三个簇全部完成后本该统一把这十个字段私有化，但按用户的决定：`git_refresh_generation` 属于 9C（Git 刷新 request/completion 收进 Session 时才处理），9B 收尾时不提前私有化任何字段——9C 把 `git_refresh_generation` 也收进方法之后，再一次性把全部 10 个字段私有化，避免中途出现"半私有 API"。9B 结束时的实际状态是：字段依然全部 `pub`，但 GTK 对 `project`/`posts`/`document`/`dirty`/`document_epoch`/`edit_generation`/`unsaved_documents` 这 9 个字段只保留读，不再有任何直接写；`git_refresh_generation` 仍然读写皆有，等 9C 处理。
 
-**9C（未开始）：统一能力计算和异步 generation。** `WorkspaceSession` 提供 `capabilities()`（取代 GTK 手工拼 `WorkspaceCapabilitiesInput`）、`begin_git_refresh()`/`apply_git_snapshot(request, snapshot)`（不是重写 `should_apply_git_refresh()`，而是让 session 统一负责生成 request、保存 generation、校验 completion、安装 snapshot）。完成后 GTK 不再自己维护应用状态不变量。
+**9C（已完成）：统一能力计算、Git 刷新 generation、busy，并把全部字段私有化。**
+
+- `capabilities(&self) -> WorkspaceCapabilities`：内部调用既有的 `capabilities_for(WorkspaceCapabilitiesInput { .. })`（第 3 项的产物，逻辑没有改写，只是把拼装输入这一步从 GTK 挪进 Session）。`sync_controls()` 从原来手工拼 6 个字段的 `WorkspaceCapabilitiesInput` 简化成一行 `state.borrow().session.capabilities()`。
+- `begin_git_refresh(&mut self) -> Option<GitRefreshRequest>`：没有项目时清空 `git_snapshot` 并返回 `None`；有项目时推进 `git_refresh_generation`，返回携带当前 `ProjectContext`（不只是 root——后台任务需要完整 context 去调用 `git::snapshot`）和新 generation 的 request。
+- `is_git_refresh_current(&self, request) -> bool` / `apply_git_snapshot(&mut self, request, snapshot) -> bool`：前者只读校验（复用既有的 `should_apply_git_refresh`，逻辑不变，只是从 GTK 手工拼 root+generation 校验参数改成读 `request.context.root`），后者在校验通过时才安装 `git_snapshot` 并返回是否真的安装了。`git_panel.rs` 的 `refresh()` 用这一对方法重写：`Ok(snapshot)` 分支调用 `apply_git_snapshot` 决定要不要渲染；`Err(error)` 分支单独调用 `is_git_refresh_current` 决定要不要展示错误——跟原代码"一次 staleness 检查同时挡住 Ok/Err 两个分支"的行为完全一致，只是拆成两次调用而不是一次前置检查，因为两个分支现在各自持有不同的借用范围。
+- `set_busy(&mut self, busy: bool)`：只写 `busy` 字段。GTK 的 `set_busy()` 函数本身保留在 GTK——它还要根据 `busy`/`document`/`dirty`/`project`/`posts` 选择哪条本地化状态栏文案（`UiMessage::DocumentUnsavedStatus`/`DocumentStatus`/`ProjectOpenedStatus`/`ReadyStatus`），这是 presentation/i18n 决策，不属于 Session；GTK 现在只是把这几个字段的读改成调用只读 getter。
+- 一处规格之外的新增：`replace_project_context(&mut self, context: ProjectContext) -> bool`——`window/publish.rs` 里发布成功后可能拿到一份更新过的 `ProjectContext`（比如 exclude 配置被顺带写入），原代码手工比较 root 是否匹配当前项目才替换；这类"完成结果是否仍对应当前状态"的校验逻辑照第 9C 轮的风格收进 Session（跟 `apply_git_snapshot`/`apply_saved_document` 同一个模式：内部校验，返回是否真的应用了），不属于 workspace/document/save-dirty 任何一个已有簇，但显然是同一类"异步结果到达时的 staleness 校验"问题，9C 顺手做掉。root 不匹配或没有项目时返回 `false`、不改变任何字段；root 匹配时只替换 `project`，不碰 `document`/`dirty`/`document_epoch`/`unsaved_documents`——这是"同一个 workspace 的 context 被重新写入配置后更新"，不是 `install_workspace()`。
+- **只读 getter**：`project()`/`posts()`/`document()`/`dirty()`/`busy()`/`document_epoch()`/`edit_generation()`/`git_snapshot()`/`unsaved_document_count()`/`has_unsaved_documents()`/`unsaved_document(post_id)`/`unsaved_documents()`（后者返回 `impl Iterator<Item = &PostDocument>`，供 `save_and_close`/`save_all`/`discard_and_close`/关闭确认对话框这类"拿到全部未保存文档列表"的调用点使用）。**没有** `git_refresh_generation()`——按审阅意见去掉了：`begin_git_refresh`/`is_git_refresh_current`/`apply_git_snapshot` 已经把 generation 的生成/比较/更新完整封装，GTK 不需要也不该读原始 `u64`，暴露这个 getter 只会泄漏"Git 刷新用 generation 计数器实现"这个内部细节；`session.rs` 自己的测试通过同一模块内的私有字段访问验证 generation 语义，不需要公开 API。
+- **字段全部私有化**：`WorkspaceSession` 的 10 个字段（`project`/`posts`/`document`/`dirty`/`busy`/`document_epoch`/`edit_generation`/`git_snapshot`/`git_refresh_generation`/`unsaved_documents`）不再有任何一个是 `pub`。`cloudstack-gtk` 里所有直接字段访问（包括 9B 结束时特意保留的 `git_refresh_generation`/`git_snapshot`/`busy` 三个写入点）都已经改成方法/getter 调用，跨 `window.rs` + `window/{articles,drafts,frontmatter,git_panel,publish,recent}.rs` 共处理约 110 处编译错误驱动出的调用点。9B 遗留的两处小问题也顺手清理：`session.rs` 顶部那句"字段保持 pub 直到 9B"的过时说明已更新为准确描述 9A→9B→9C 的实际时间线；`close_workspace_is_idempotent_when_already_empty` 已按建议改名为 `close_workspace_when_empty_stays_empty_and_advances_epoch`（该测试实际验证的是"从空状态关闭仍会推进 epoch"，不是真正的幂等性）。
+
+**残留检查**：
+```bash
+rg '\.session\.(project|posts|document|dirty|busy|document_epoch|edit_generation|git_snapshot|git_refresh_generation|unsaved_documents)\b(?!\(\))' crates/cloudstack-gtk --pcre2
+```
+零匹配——`cloudstack-gtk` 里对这十个字段名的引用现在全部带 `()`（方法调用），没有任何直接字段访问残留。`cargo tree -p cloudstack-application --edges normal` 确认仍然只依赖 `cloudstack-core`。
+
+**测试**：新增 10 个：`set_busy_updates_the_busy_flag`、`capabilities_reflects_current_state`、`begin_git_refresh_returns_none_and_clears_snapshot_without_a_project`、`begin_git_refresh_advances_generation_and_captures_current_context`、`apply_git_snapshot_installs_when_request_is_current`、`apply_git_snapshot_rejects_a_stale_generation`、`apply_git_snapshot_rejects_after_project_switched`、`replace_project_context_replaces_when_root_matches`（额外断言 document/dirty/document_epoch/unsaved_documents 都不受影响）、`replace_project_context_rejects_a_different_root`、`replace_project_context_rejects_without_a_project`。`cloudstack-application` 103 → 113（+10），`cloudstack-gtk` 不变，workspace 总数 303 → 313。
+
+至此 `cloudstack-gtk` 的 `EditorState` 只剩 `session: WorkspaceSession`（业务状态，全部私有，只经方法/getter 访问）+ `loading_buffer`（SourceView buffer 加载标志）+ `draft_queue`（草稿 FIFO 队列 + GLib 定时器）+ `pending_assets`（待提交图片，跟剪贴板/图片 UI 生命周期绑定）四个字段，第 1～9 项（含 9A/9B/9C）规划的应用状态机迁移全部完成。
 
 ### 阶段 10：无损文本文件合同
 

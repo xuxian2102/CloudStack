@@ -15,10 +15,10 @@ pub(super) fn show_create_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorSta
     let has_unsaved = has_unsaved_documents(state);
     let context = {
         let state = state.borrow();
-        if state.session.busy || has_unsaved {
+        if state.session.busy() || has_unsaved {
             return;
         }
-        let Some(context) = &state.session.project else {
+        let Some(context) = state.session.project() else {
             return;
         };
         context.clone()
@@ -107,10 +107,10 @@ pub(super) fn show_rename_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorSta
     let has_unsaved = has_unsaved_documents(state);
     let (context, document) = {
         let state = state.borrow();
-        if state.session.busy || has_unsaved {
+        if state.session.busy() || has_unsaved {
             return;
         }
-        let (Some(context), Some(document)) = (&state.session.project, &state.session.document)
+        let (Some(context), Some(document)) = (state.session.project(), state.session.document())
         else {
             return;
         };
@@ -212,10 +212,10 @@ pub(super) fn show_delete_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorSta
     let has_unsaved = has_unsaved_documents(state);
     let (context, document) = {
         let state = state.borrow();
-        if state.session.busy || has_unsaved {
+        if state.session.busy() || has_unsaved {
             return;
         }
-        let (Some(context), Some(document)) = (&state.session.project, &state.session.document)
+        let (Some(context), Some(document)) = (state.session.project(), state.session.document())
         else {
             return;
         };

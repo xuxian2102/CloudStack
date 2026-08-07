@@ -19,7 +19,6 @@ use crate::tasks;
 use cloudstack_application::git::{
     effective_action, recommended_action, EffectiveGitAction, PrimaryGitAction,
 };
-use cloudstack_application::should_apply_git_refresh;
 
 const MAX_DISPLAYED_CHANGES: usize = 100;
 
@@ -741,12 +740,12 @@ pub(super) fn activate_primary(widgets: &Widgets, state: &Rc<RefCell<EditorState
     let action = {
         let state = state.borrow();
         effective_action(
-            state.session.git_snapshot.as_ref(),
-            state.session.busy,
-            state.session.unsaved_documents.len(),
+            state.session.git_snapshot(),
+            state.session.busy(),
+            state.session.unsaved_document_count(),
         )
     };
-    let snapshot = state.borrow().session.git_snapshot.clone();
+    let snapshot = state.borrow().session.git_snapshot().cloned();
     match action {
         EffectiveGitAction::None => {
             if snapshot.is_none() {
@@ -896,7 +895,7 @@ fn show_identity_dialog(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
 }
 
 pub(super) fn fetch_remote(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
-    if state.borrow().session.busy {
+    if state.borrow().session.busy() {
         return;
     }
     let heading = i18n::text(UiMessage::GitFetchOperation);
@@ -965,10 +964,10 @@ fn execute_operation<Work>(
     let has_unsaved = has_unsaved_documents(state);
     let context = {
         let state = state.borrow();
-        if state.session.busy || (completion == Completion::ReloadProject && has_unsaved) {
+        if state.session.busy() || (completion == Completion::ReloadProject && has_unsaved) {
             return;
         }
-        let Some(context) = &state.session.project else {
+        let Some(context) = state.session.project() else {
             return;
         };
         context.clone()
@@ -1106,7 +1105,7 @@ fn show_remote_dialog(
     state: &Rc<RefCell<EditorState>>,
     snapshot: &RepositorySnapshot,
 ) {
-    let Some(context) = state.borrow().session.project.clone() else {
+    let Some(context) = state.borrow().session.project().cloned() else {
         return;
     };
     let url_entry = gtk::Entry::builder()
@@ -1284,47 +1283,29 @@ pub(super) fn operation_log(report: &OperationReport) -> String {
 }
 
 pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
-    let Some(context) = state.borrow().session.project.clone() else {
-        state.borrow_mut().session.git_snapshot = None;
+    let Some(request) = state.borrow_mut().session.begin_git_refresh() else {
         widgets.git_panel.set_project_available(false);
         return;
     };
     widgets.git_panel.set_loading();
-    let expected_root = context.root.clone();
-    let expected_generation = {
-        let mut editor_state = state.borrow_mut();
-        editor_state.session.git_refresh_generation =
-            editor_state.session.git_refresh_generation.wrapping_add(1);
-        editor_state.session.git_refresh_generation
-    };
+    let task_context = request.context.clone();
     let widgets = widgets.clone();
     let state = Rc::clone(state);
     tasks::run(
-        move || git::snapshot(&context),
-        move |result| {
-            let still_current = {
-                let editor_state = state.borrow();
-                should_apply_git_refresh(
-                    editor_state
-                        .session
-                        .project
-                        .as_ref()
-                        .map(|current| current.root.as_path()),
-                    &expected_root,
-                    editor_state.session.git_refresh_generation,
-                    expected_generation,
-                )
-            };
-            if !still_current {
-                return;
-            }
-            match result {
-                Ok(snapshot) => {
+        move || git::snapshot(&task_context),
+        move |result| match result {
+            Ok(snapshot) => {
+                let applied = state
+                    .borrow_mut()
+                    .session
+                    .apply_git_snapshot(&request, snapshot.clone());
+                if applied {
                     widgets.git_panel.apply(&snapshot);
-                    state.borrow_mut().session.git_snapshot = Some(snapshot);
                     super::sync_controls(&widgets, &state);
                 }
-                Err(error) => {
+            }
+            Err(error) => {
+                if state.borrow().session.is_git_refresh_current(&request) {
                     widgets
                         .git_panel
                         .set_error(&i18n::text(UiMessage::GitStatusReadFailed));

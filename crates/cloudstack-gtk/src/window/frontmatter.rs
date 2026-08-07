@@ -23,7 +23,7 @@ pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
 
     let (fields, post_id, raw_frontmatter) = {
         let state = state.borrow();
-        let (Some(project), Some(document)) = (&state.session.project, &state.session.document)
+        let (Some(project), Some(document)) = (state.session.project(), state.session.document())
         else {
             append_hint(widgets, &i18n::text(UiMessage::FrontmatterOpenHint));
             return;
@@ -472,8 +472,7 @@ fn update_field(
     let raw_frontmatter = state
         .borrow()
         .session
-        .document
-        .as_ref()
+        .document()
         .and_then(|document| document.raw_frontmatter.clone());
     let Some(raw_frontmatter) = raw_frontmatter else {
         return;

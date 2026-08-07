@@ -25,9 +25,7 @@ use crate::search::SearchPanel;
 use crate::tasks;
 use cloudstack_application::session::WorkspaceSession;
 use cloudstack_application::workspace::{open_workspace, OpenWorkspaceOutcome};
-use cloudstack_application::{
-    capabilities_for, SaveCompletionOutcome, WorkspaceCapabilities, WorkspaceCapabilitiesInput,
-};
+use cloudstack_application::{SaveCompletionOutcome, WorkspaceCapabilities};
 
 const DEFAULT_EDITOR_PANE_WIDTH: i32 = 570;
 const MIN_PREVIEW_PANE_WIDTH: i32 = 360;
@@ -395,7 +393,7 @@ fn connect_editor(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     let widgets = widgets.clone();
     let state = Rc::clone(state);
     widgets.buffer.clone().connect_changed(move |_| {
-        if state.borrow().loading_buffer || state.borrow().session.document.is_none() {
+        if state.borrow().loading_buffer || state.borrow().session.document().is_none() {
             return;
         }
         mark_document_dirty(&widgets, &state);
@@ -420,7 +418,7 @@ fn connect_image_paste(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
             && key.to_unicode().is_some_and(|character| character == 'v');
         let paste_blocked = {
             let state = state.borrow();
-            state.session.document.is_none() || state.session.busy
+            state.session.document().is_none() || state.session.busy()
         };
         if !is_paste || paste_blocked {
             return glib::Propagation::Proceed;
@@ -447,7 +445,7 @@ fn paste_clipboard_image(
 ) {
     let (context, post_id) = {
         let state = state.borrow();
-        let (Some(context), Some(document)) = (&state.session.project, &state.session.document)
+        let (Some(context), Some(document)) = (state.session.project(), state.session.document())
         else {
             return;
         };
@@ -480,8 +478,7 @@ fn paste_clipboard_image(
         let is_same_document = state
             .borrow()
             .session
-            .document
-            .as_ref()
+            .document()
             .is_some_and(|document| document.id == post_id);
         if !is_same_document {
             return;
@@ -544,7 +541,7 @@ fn connect_actions(
     let publish_widgets = widgets.clone();
     let publish_state = Rc::clone(state);
     publish_action.connect_activate(move |_, _| {
-        if publish_state.borrow().session.busy {
+        if publish_state.borrow().session.busy() {
             return;
         }
         let unsaved_count = unsaved_document_count(&publish_state);
@@ -557,14 +554,14 @@ fn connect_actions(
             );
             return;
         }
-        if unsaved_count == 1 && !publish_state.borrow().session.dirty {
+        if unsaved_count == 1 && !publish_state.borrow().session.dirty() {
             toast(
                 &publish_widgets,
                 &i18n::text(UiMessage::GitSaveBeforeAction { count: 1 }),
             );
             return;
         }
-        if publish_state.borrow().session.dirty {
+        if publish_state.borrow().session.dirty() {
             let callback_widgets = publish_widgets.clone();
             let callback_state = Rc::clone(&publish_state);
             save_document_then(
@@ -681,7 +678,7 @@ fn connect_post_list(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
             let post_id = state
                 .borrow()
                 .session
-                .posts
+                .posts()
                 .get(index)
                 .map(|post| post.id.clone());
             if let Some(post_id) = post_id {
@@ -694,10 +691,10 @@ fn connect_post_list(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
 /// 忙碌或有未保存文章时都不能切走。
 fn ensure_no_unsaved_documents(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) -> bool {
     let state_snapshot = state.borrow();
-    if state_snapshot.session.busy {
+    if state_snapshot.session.busy() {
         return false;
     }
-    if !state_snapshot.session.unsaved_documents.is_empty() {
+    if state_snapshot.session.has_unsaved_documents() {
         drop(state_snapshot);
         toast(widgets, &i18n::text(UiMessage::UnsavedProjectSwitch));
         return false;
@@ -712,8 +709,7 @@ fn retry_pending_asset_cleanup(state: &Rc<RefCell<EditorState>>) {
     let Some(root) = state
         .borrow()
         .session
-        .project
-        .as_ref()
+        .project()
         .map(|context| context.root.clone())
     else {
         return;
@@ -761,7 +757,7 @@ fn close_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     if !ensure_no_unsaved_documents(widgets, state) {
         return;
     }
-    if state.borrow().session.project.is_none() {
+    if state.borrow().session.project().is_none() {
         return;
     }
     retry_pending_asset_cleanup(state);
@@ -790,7 +786,7 @@ fn close_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
 }
 
 fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path) {
-    if state.borrow().session.busy {
+    if state.borrow().session.busy() {
         return;
     }
     let scanning_status = i18n::text(UiMessage::ProjectScanningStatus);
@@ -845,7 +841,7 @@ fn open_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, path: &Path
                     state
                         .borrow()
                         .session
-                        .posts
+                        .posts()
                         .first()
                         .map(|post| post.id.clone())
                 });
@@ -882,7 +878,7 @@ fn apply_opened_workspace(
         .install_workspace(context, post_summaries);
     let epoch = installed.document_epoch;
     drop(editor_state);
-    let post_summaries = state.borrow().session.posts.clone();
+    let post_summaries = state.borrow().session.posts().to_vec();
     populate_post_list(widgets, state, &post_summaries);
     let empty_post_list = i18n::text(UiMessage::InitialPostListText);
     widgets.buffer.set_text(&format!("{empty_post_list}\n"));
@@ -1075,7 +1071,7 @@ fn initialize_and_open_project(
     content_dir: String,
     with_blog_frontmatter: bool,
 ) {
-    if state.borrow().session.busy {
+    if state.borrow().session.busy() {
         return;
     }
     let busy_message = i18n::text(UiMessage::CreatingProjectConfigStatus);
@@ -1112,11 +1108,7 @@ fn populate_post_list(
         widgets.post_list.remove(&child);
     }
     for post in post_summaries {
-        let unsaved = state
-            .borrow()
-            .session
-            .unsaved_documents
-            .contains_key(&post.id);
+        let unsaved = state.borrow().session.unsaved_document(&post.id).is_some();
         let label = gtk::Label::builder()
             .label(post_list_label(&post.relative_path, unsaved).as_str())
             .xalign(0.0)
@@ -1152,7 +1144,7 @@ fn update_post_marker(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, post_
         let state = state.borrow();
         let Some((index, post)) = state
             .session
-            .posts
+            .posts()
             .iter()
             .enumerate()
             .find(|(_, post)| post.id == post_id)
@@ -1162,7 +1154,7 @@ fn update_post_marker(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, post_
         (
             index,
             post.relative_path.clone(),
-            state.session.unsaved_documents.contains_key(post_id),
+            state.session.unsaved_document(post_id).is_some(),
         )
     };
     let Ok(index) = i32::try_from(index) else {
@@ -1184,16 +1176,15 @@ fn update_post_marker(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, post_
 fn load_document(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, post_id: &str) {
     let (context, unsaved_document, already_open) = {
         let state = state.borrow();
-        let context = state.session.project.clone();
-        let unsaved_document = state.session.unsaved_documents.get(post_id).cloned();
+        let context = state.session.project().cloned();
+        let unsaved_document = state.session.unsaved_document(post_id).cloned();
         let already_open = state
             .session
-            .document
-            .as_ref()
+            .document()
             .is_some_and(|document| document.id == post_id);
         (context, unsaved_document, already_open)
     };
-    if already_open || state.borrow().session.busy {
+    if already_open || state.borrow().session.busy() {
         return;
     }
     let Some(context) = context else {
@@ -1254,8 +1245,8 @@ fn display_document(
     widgets.status_label.set_label(&status);
     let mut editor_state = state.borrow_mut();
     editor_state.loading_buffer = false;
-    let epoch = editor_state.session.document_epoch;
-    let context = editor_state.session.project.clone();
+    let epoch = editor_state.session.document_epoch();
+    let context = editor_state.session.project().cloned();
     drop(editor_state);
     let project_name = context
         .as_ref()
@@ -1309,12 +1300,12 @@ fn save_document_then(
     // 交互式保存的“单飞”约束：手动保存通过本路径发起并先置 busy=true，
     // GTK 主线程串行分发事件下，第二次保存不会在第一次完成前插入执行。
     // 后续若放开并发或多任务保存，需引入保存任务身份与乱序 completion 防护。
-    if state.borrow().session.busy {
+    if state.borrow().session.busy() {
         return;
     }
     let (context, document) = {
         let state = state.borrow();
-        let (Some(context), Some(document)) = (&state.session.project, &state.session.document)
+        let (Some(context), Some(document)) = (state.session.project(), state.session.document())
         else {
             return;
         };
@@ -1327,7 +1318,10 @@ fn save_document_then(
     let body = text.to_string();
     let (saved_document_epoch, saved_generation) = {
         let state = state.borrow();
-        (state.session.document_epoch, state.session.edit_generation)
+        (
+            state.session.document_epoch(),
+            state.session.edit_generation(),
+        )
     };
     let task_frontmatter = raw_frontmatter.clone();
     let task_body = body.clone();
@@ -1420,7 +1414,7 @@ fn mark_document_dirty(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     };
     update_post_marker(widgets, state, &dirty.post_id);
     sync_controls(widgets, state);
-    if let Some(document) = &state.borrow().session.document {
+    if let Some(document) = state.borrow().session.document() {
         widgets
             .status_label
             .set_label(&i18n::text(UiMessage::DocumentUnsavedStatus {
@@ -1431,13 +1425,13 @@ fn mark_document_dirty(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
 }
 
 fn set_busy(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, busy: bool, message: &str) {
-    state.borrow_mut().session.busy = busy;
+    state.borrow_mut().session.set_busy(busy);
     if busy && !message.is_empty() {
         widgets.status_label.set_label(message);
     } else if !busy {
         let editor_state = state.borrow();
-        if let Some(document) = &editor_state.session.document {
-            let status = if editor_state.session.dirty {
+        if let Some(document) = editor_state.session.document() {
+            let status = if editor_state.session.dirty() {
                 i18n::text(UiMessage::DocumentUnsavedStatus {
                     path: document.relative_path.clone(),
                 })
@@ -1447,11 +1441,11 @@ fn set_busy(widgets: &Widgets, state: &Rc<RefCell<EditorState>>, busy: bool, mes
                 })
             };
             widgets.status_label.set_label(&status);
-        } else if editor_state.session.project.is_some() {
+        } else if editor_state.session.project().is_some() {
             widgets
                 .status_label
                 .set_label(&i18n::text(UiMessage::ProjectOpenedStatus {
-                    count: editor_state.session.posts.len(),
+                    count: editor_state.session.posts().len(),
                 }));
         } else {
             widgets
@@ -1497,33 +1491,23 @@ fn sync_controls(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     // 借用只在算出不可变的 capabilities 快照期间存在；render_controls 触发
     // 的 GTK setter 调用不会持有 state 的借用，避免以后某个 setter 的信号
     // 回调间接再次借用 state 时产生运行时 borrow panic。
-    let capabilities = {
-        let state = state.borrow();
-        capabilities_for(WorkspaceCapabilitiesInput {
-            has_project: state.session.project.is_some(),
-            has_document: state.session.document.is_some(),
-            unsaved_document_count: state.session.unsaved_documents.len(),
-            busy: state.session.busy,
-            dirty: state.session.dirty,
-            git_snapshot: state.session.git_snapshot.as_ref(),
-        })
-    };
+    let capabilities = state.borrow().session.capabilities();
     render_controls(widgets, &capabilities);
 }
 
 fn has_unsaved_documents(state: &Rc<RefCell<EditorState>>) -> bool {
-    !state.borrow().session.unsaved_documents.is_empty()
+    state.borrow().session.has_unsaved_documents()
 }
 
 fn unsaved_document_count(state: &Rc<RefCell<EditorState>>) -> usize {
-    state.borrow().session.unsaved_documents.len()
+    state.borrow().session.unsaved_document_count()
 }
 
 fn connect_close_guard(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     let widgets = widgets.clone();
     let state = Rc::clone(state);
     widgets.window.clone().connect_close_request(move |_| {
-        if state.borrow().session.busy {
+        if state.borrow().session.busy() {
             toast(&widgets, &i18n::text(UiMessage::CloseWhileBusy));
             return glib::Propagation::Stop;
         }
@@ -1538,8 +1522,7 @@ fn connect_close_guard(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
             let state = state.borrow();
             let mut documents = state
                 .session
-                .unsaved_documents
-                .values()
+                .unsaved_documents()
                 .map(|document| document.relative_path.clone())
                 .collect::<Vec<_>>();
             documents.sort();
