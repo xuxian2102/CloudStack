@@ -46,11 +46,13 @@ pub fn save_documents(
             &document.id,
             document.raw_frontmatter.as_deref(),
             &document.body,
+            document.format,
             &document.revision,
         ) {
-            Ok(revision) => {
+            Ok(result) => {
                 let mut saved = document;
-                saved.revision = revision;
+                saved.revision = result.revision;
+                saved.format = result.format;
                 if let Err(error) = storage.delete(context, &saved.id) {
                     report.cleanup_warnings.push(DraftCleanupWarning {
                         relative_path: saved.relative_path.clone(),

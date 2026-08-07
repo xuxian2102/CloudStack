@@ -15,6 +15,7 @@ use crate::path_guard::resolve_post_path;
 use crate::services::assets::asset_dir_for_post;
 use crate::services::markdown;
 use crate::services::operations;
+use crate::text::{decode_text, encode_text, LineEnding, TextFileFormat};
 
 pub fn revision_of(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -182,17 +183,24 @@ fn has_allowed_extension(path: &Path, extensions: &[String]) -> bool {
 pub fn read_post(ctx: &ProjectContext, id: &str) -> Result<PostDocument, AppError> {
     let path = resolve_post_path(&ctx.content_root, &ctx.config.extensions, id)?;
     let bytes = read_existing(&path, id)?;
-    let text =
-        String::from_utf8(bytes).map_err(|_| AppError::Io(format!("文件不是 UTF-8 编码：{id}")))?;
-    let revision = revision_of(text.as_bytes());
-    let (fm, body) = split_markdown(&text);
+    // revision 必须先于任何解码/归一化算出来，这样外部只改了 EOL 风格的
+    // 修改也能被判定为冲突，而不是被 decode_text 归一化之后悄悄放过。
+    let revision = revision_of(&bytes);
+    let decoded = decode_text(&bytes)?;
+    let (fm, body) = split_markdown(&decoded.text);
     Ok(PostDocument {
         id: id.to_owned(),
         relative_path: id.to_owned(),
         raw_frontmatter: fm.map(str::to_owned),
         body: body.to_owned(),
         revision,
+        format: decoded.format,
     })
+}
+
+pub struct PostWriteResult {
+    pub revision: String,
+    pub format: TextFileFormat,
 }
 
 pub fn write_post(
@@ -200,16 +208,36 @@ pub fn write_post(
     id: &str,
     raw_frontmatter: Option<&str>,
     body: &str,
+    format: TextFileFormat,
     expected_revision: &str,
-) -> Result<String, AppError> {
+) -> Result<PostWriteResult, AppError> {
     let path = resolve_post_path(&ctx.content_root, &ctx.config.extensions, id)?;
     let current = read_existing(&path, id)?;
     if revision_of(&current) != expected_revision {
         return Err(AppError::ExternalModificationConflict);
     }
-    let content = join_markdown(raw_frontmatter, body);
-    atomic_write_checked(&path, content.as_bytes(), Some(expected_revision))?;
-    Ok(revision_of(content.as_bytes()))
+    let mut content = join_markdown(raw_frontmatter, body);
+    // frontmatter-only 且正文为空时，join_markdown 总会在闭合的 "---" 后面
+    // 强制补一个换行；这种情况下 body 本身是空字符串，不携带任何信息能区分
+    // 磁盘原文到底有没有这个换行，只能靠读盘时观察到的 has_final_newline
+    // 兜底纠正。其余情况下末尾有没有换行完全由 body 自身内容决定，见
+    // `crate::text` 模块文档。
+    if raw_frontmatter.is_some()
+        && body.is_empty()
+        && !format.has_final_newline
+        && content.ends_with('\n')
+    {
+        content.pop();
+    }
+    let bytes = encode_text(&content, format.line_ending)?;
+    atomic_write_checked(&path, &bytes, Some(expected_revision))?;
+    // 保存后的 format 反映实际落盘的字节，而不是调用方传入的旧 format——
+    // 比如 Mixed 换行的文件保存一次之后就会变成 Lf。
+    let written_format = decode_text(&bytes)?.format;
+    Ok(PostWriteResult {
+        revision: revision_of(&bytes),
+        format: written_format,
+    })
 }
 
 pub fn create_post(
@@ -223,6 +251,7 @@ pub fn create_post(
         fs::create_dir_all(parent)?;
     }
     let content = join_markdown(raw_frontmatter, body);
+    let bytes = encode_text(&content, LineEnding::Lf)?;
     let parent = path
         .parent()
         .ok_or_else(|| AppError::Io("文章路径没有父目录".into()))?;
@@ -230,7 +259,7 @@ pub fn create_post(
     temporary
         .as_file()
         .set_permissions(fs::Permissions::from_mode(0o644))?;
-    temporary.write_all(content.as_bytes())?;
+    temporary.write_all(&bytes)?;
     temporary.as_file().sync_all()?;
     temporary.persist_noclobber(&path).map_err(|error| {
         if error.error.kind() == std::io::ErrorKind::AlreadyExists {
@@ -853,11 +882,12 @@ mod tests {
         );
 
         // 原样写回 → 文件字节不变
-        let rev = write_post(
+        let result = write_post(
             &ctx,
             "a.md",
             doc.raw_frontmatter.as_deref(),
             &doc.body,
+            doc.format,
             &doc.revision,
         )
         .unwrap();
@@ -865,7 +895,37 @@ mod tests {
             std::fs::read_to_string(ctx.content_root.join("a.md")).unwrap(),
             original
         );
-        assert_eq!(rev, doc.revision);
+        assert_eq!(result.revision, doc.revision);
+        assert_eq!(result.format, doc.format);
+    }
+
+    #[test]
+    fn write_preserves_frontmatter_only_file_without_final_newline() {
+        let (_dir, ctx) = ctx();
+        // frontmatter-only、正文为空、"---" 之后没有任何换行——body 本身是
+        // 空字符串，唯一能区分"磁盘原本就没有这个换行"的信号是读盘时记录
+        // 的 has_final_newline。
+        let original = "---\ntitle: a\n---";
+        std::fs::write(ctx.content_root.join("a.md"), original).unwrap();
+
+        let doc = read_post(&ctx, "a.md").unwrap();
+        assert_eq!(doc.body, "");
+        assert!(!doc.format.has_final_newline);
+
+        let result = write_post(
+            &ctx,
+            "a.md",
+            doc.raw_frontmatter.as_deref(),
+            &doc.body,
+            doc.format,
+            &doc.revision,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(ctx.content_root.join("a.md")).unwrap(),
+            original
+        );
+        assert_eq!(result.revision, doc.revision);
     }
 
     #[test]
@@ -877,7 +937,7 @@ mod tests {
         // 模拟外部编辑器改了文件
         std::fs::write(ctx.content_root.join("a.md"), "---\nt: 2\n---\ny").unwrap();
 
-        let result = write_post(&ctx, "a.md", None, "覆盖", &doc.revision);
+        let result = write_post(&ctx, "a.md", None, "覆盖", doc.format, &doc.revision);
         assert!(matches!(
             result,
             Err(AppError::ExternalModificationConflict)

@@ -1,4 +1,5 @@
 use crate::error::ErrorPayload;
+use crate::text::TextFileFormat;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -22,6 +23,8 @@ pub struct PostDocument {
     pub body: String,
     /// 整个文件字节的 SHA-256，保存时回传用于检测外部修改
     pub revision: String,
+    /// 读盘时观察到的换行风格和末尾换行状态；保存时用于 `write_post` 编码。
+    pub format: TextFileFormat,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

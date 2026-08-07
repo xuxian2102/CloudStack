@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use cloudstack_core::model::PostDocument;
+use cloudstack_core::text::TextFileFormat;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveCompletionOutcome {
@@ -13,8 +14,10 @@ pub enum SaveCompletionOutcome {
     /// 还是这篇文章，保存期间没有新编辑，正常清空 dirty。
     Clean,
     /// 还是这篇文章，但保存期间又有新编辑（generation 已推进）：只更新
-    /// revision，dirty/unsaved_documents/draft 都保留，也不 reconcile pending
-    /// 图片（那需要当前正文的真实快照，留给下一次 Clean 保存处理）。
+    /// revision 和 format 这两个描述"新磁盘基线"的属性，dirty/unsaved_documents
+    /// 里的 body/frontmatter/draft 都保留（不能用旧保存覆盖用户更新后的正文），
+    /// 也不 reconcile pending 图片（那需要当前正文的真实快照，留给下一次 Clean
+    /// 保存处理）。
     RevisionOnly,
 }
 
@@ -48,6 +51,7 @@ pub fn apply_successful_save(
     dirty: &mut bool,
     document_id: &str,
     revision: &str,
+    format: TextFileFormat,
     raw_frontmatter: Option<String>,
     body: String,
 ) {
@@ -58,6 +62,7 @@ pub fn apply_successful_save(
                 current.raw_frontmatter = raw_frontmatter;
                 current.body = body;
                 current.revision = revision.to_owned();
+                current.format = format;
             }
             unsaved_documents.remove(document_id);
             *dirty = false;
@@ -65,9 +70,11 @@ pub fn apply_successful_save(
         SaveCompletionOutcome::RevisionOnly => {
             if let Some(current) = document.as_mut() {
                 current.revision = revision.to_owned();
+                current.format = format;
             }
             if let Some(unsaved) = unsaved_documents.get_mut(document_id) {
                 unsaved.revision = revision.to_owned();
+                unsaved.format = format;
             }
         }
     }
@@ -76,6 +83,7 @@ pub fn apply_successful_save(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cloudstack_core::text::LineEnding;
 
     fn sample_document() -> PostDocument {
         PostDocument {
@@ -84,6 +92,14 @@ mod tests {
             raw_frontmatter: Some("title: x".into()),
             body: "old body".into(),
             revision: "old-revision".into(),
+            format: sample_format(),
+        }
+    }
+
+    fn sample_format() -> TextFileFormat {
+        TextFileFormat {
+            line_ending: LineEnding::Lf,
+            has_final_newline: true,
         }
     }
 
@@ -130,6 +146,10 @@ mod tests {
         unsaved_documents.insert("hello.md".to_string(), sample_document());
         let mut dirty = true;
 
+        let new_format = TextFileFormat {
+            line_ending: LineEnding::CrLf,
+            has_final_newline: false,
+        };
         apply_successful_save(
             SaveCompletionOutcome::Clean,
             &mut document,
@@ -137,6 +157,7 @@ mod tests {
             &mut dirty,
             "hello.md",
             "new-revision",
+            new_format,
             Some("title: y".into()),
             "new body".into(),
         );
@@ -145,6 +166,7 @@ mod tests {
         assert_eq!(document.revision, "new-revision");
         assert_eq!(document.body, "new body");
         assert_eq!(document.raw_frontmatter.as_deref(), Some("title: y"));
+        assert_eq!(document.format, new_format);
         assert!(!dirty);
         assert!(!unsaved_documents.contains_key("hello.md"));
     }
@@ -156,6 +178,10 @@ mod tests {
         unsaved_documents.insert("hello.md".to_string(), sample_document());
         let mut dirty = true;
 
+        let new_format = TextFileFormat {
+            line_ending: LineEnding::CrLf,
+            has_final_newline: false,
+        };
         apply_successful_save(
             SaveCompletionOutcome::RevisionOnly,
             &mut document,
@@ -163,6 +189,7 @@ mod tests {
             &mut dirty,
             "hello.md",
             "new-revision",
+            new_format,
             Some("title: y".into()),
             "new body".into(),
         );
@@ -172,6 +199,10 @@ mod tests {
         // body/raw_frontmatter 不应该被这次保存覆盖——buffer 里已经有更新的内容了。
         assert_eq!(document.body, "old body");
         assert_eq!(document.raw_frontmatter.as_deref(), Some("title: x"));
+        assert_eq!(
+            document.format, new_format,
+            "revision-only 时 format 也要跟着落盘结果更新"
+        );
         assert!(dirty, "generation 已推进时不能清空 dirty");
         let unsaved = unsaved_documents
             .get("hello.md")
@@ -179,6 +210,15 @@ mod tests {
         assert_eq!(
             unsaved.revision, "new-revision",
             "unsaved_documents 里的 revision 也必须跟着更新，否则下一次批量保存会用过期 revision"
+        );
+        assert_eq!(
+            unsaved.format, new_format,
+            "unsaved snapshot 的 format 描述的是它继承的磁盘基线，必须和 revision 一起更新，\
+             否则切换文章再切回来会展示一个已经过期的换行风格"
+        );
+        assert_eq!(
+            unsaved.body, "old body",
+            "unsaved snapshot 的 body 不能被这次保存覆盖"
         );
     }
 
@@ -196,6 +236,7 @@ mod tests {
             &mut dirty,
             "hello.md",
             "new-revision",
+            sample_format(),
             Some("title: y".into()),
             "new body".into(),
         );

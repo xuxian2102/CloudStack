@@ -220,7 +220,7 @@ fn on_save_clicked(...) {
 
 ## 后续路线：WorkspaceSession → 无损文本合同 → Live Preview（用户提出，2026-08-07，application-layer 第一阶段收尾后）
 
-**状态：阶段 9 全部完成并冻结（9A/9B/9C + 9C.1 修正）。`WorkspaceSession` 十个字段已全部私有化，`cloudstack-gtk` 不再直接读写任何一个，只通过方法和只读 getter。阶段 10 的 10A（纯 `TextFileFormat` 合同）已完成，10B/10C 及阶段 11～14 尚未开始。**
+**状态：阶段 9 全部完成并冻结（9A/9B/9C + 9C.1 修正）。`WorkspaceSession` 十个字段已全部私有化，`cloudstack-gtk` 不再直接读写任何一个，只通过方法和只读 getter。阶段 10 的 10A（纯 `TextFileFormat` 合同）、10B（`PostDocument`/`read_post`/`write_post` 集成）已完成，10C 及阶段 11～14 尚未开始。**
 
 顺序固定，不要跳步：
 
@@ -348,7 +348,38 @@ pub fn encode_text(text: &str, line_ending: LineEnding) -> Result<Vec<u8>, AppEr
 
 **测试**：13 个，在原有 10 个基础上（`encode_adds_or_strips_the_final_newline_before_converting_to_crlf` 随设计修正一起删除，因为它测的正是需要修掉的旧行为）新增 4 个直接针对这处修正的测试：`encode_preserves_absent_final_newline_from_text`、`encode_preserves_multiple_trailing_newlines_from_text`（用户明确要求的两条）、`encode_does_not_reintroduce_a_final_newline_the_user_deleted`、`encode_does_not_strip_a_final_newline_the_user_added`（对称补充的两个方向，直接复现用户描述的 bug 场景）。`cloudstack-core` 155 → 168（+13），其他 crate 不变，workspace 总数 314 → 327。
 
-**10B（未开始）**：`PostDocument` 携带 `TextFileFormat`，`posts::read_post`/`write_post` 保留格式（读时记录、写时按原格式编码），revision 计算方式需要重新确认是否仍基于原始字节还是归一化后的文本。
+**10B（已完成）：`PostDocument` 携带 `TextFileFormat`，`read_post`/`write_post` 按用户冻结的三条不变量重写。**
+
+```rust
+pub struct PostDocument { .. , pub format: TextFileFormat }  // model.rs，新增字段
+
+pub struct PostWriteResult { pub revision: String, pub format: TextFileFormat }  // posts.rs
+
+pub fn write_post(ctx, id, raw_frontmatter, body, format: TextFileFormat, expected_revision)
+    -> Result<PostWriteResult, AppError>;
+```
+
+- **不变量 1（revision 必须先于解码算出）**：`read_post` 改成 `revision_of(&bytes)` 在 `decode_text(&bytes)?` 之前调用，两行顺序本身就是这条不变量的落地——外部只改了 EOL 风格的修改现在也会被判定为冲突，不会被 `decode_text` 的归一化悄悄放过。
+- **不变量 2（`format` 是 `PostDocument` 的一等字段）**：`model.rs` 直接加 `pub format: TextFileFormat`，没有塞进 Session；`read_post` 从 `decode_text` 返回的 `DecodedText.format` 填充它。
+- **不变量 3（frontmatter-only 空正文的特判放在 `write_post`，不放回 `encode_text`）**：`join_markdown` 在 frontmatter-only 且正文为空时，总会在闭合的 `"---"` 后强制补一个 `\n`——这种情况下 `body` 是空字符串，不携带任何信息能区分磁盘原文到底有没有这个换行，是唯一需要 `has_final_newline` 元数据兜底的结构性歧义场景。`write_post` 在调用 `encode_text` 之前，用 `raw_frontmatter.is_some() && body.is_empty() && !format.has_final_newline` 精确判定这一种情况，命中时把 `join_markdown` 强加的那个 `\n` pop 掉；正文非空的一般情况完全不受影响（末尾有没有换行仍然只由 `body` 自身内容决定，`encode_text` 的合同没有被破坏）。
+- **`write_post` 返回 `PostWriteResult { revision, format }`，`format` 重新从实际落盘的字节解码得到**，不是把调用方传入的 `format` 原样透传——`Mixed` 换行的文件保存一次之后 `format.line_ending` 会变成 `Lf`，跟磁盘真实状态一致。
+- `create_post` 顺带改成 `encode_text(&content, LineEnding::Lf)` 写入（新建文件固定 LF，防御性地归一化调用方传入的任何 `\r\n`/`\r`），返回值仍然委托给 `read_post`，不需要单独返回 format。
+- `rename_post`/`validate_rename`/`reapply_colocated_image_rewrite`/`delete_post_with` **没有改动**——按实现前的研究结论，这几个函数都直接对原始字节做局部替换后 `atomic_write`，从不经过 `join_markdown`/`encode_text`，天然无损；它们各自最终都通过 `read_post()` 取得返回值（`reapply_colocated_image_rewrite`/`delete_post_with` 甚至不返回 `PostDocument`），因此自动获得 `format` 字段，不需要任何直接修改。
+- **`PostWriteResult` 放在 `posts.rs`，不是 `model.rs`**：跟 `PostDocument`/`PublishResult`/`GitOperationResult` 不同，它是纯 Rust 到 Rust 的写入返回值，不经过任何序列化边界，所以没有 `derive(Serialize)`，也没有放进 `model.rs` 那一批需要跨边界传递的类型里。
+
+**级联到 `cloudstack-application`**：`apply_successful_save`（`save.rs`）新增 `format: TextFileFormat` 参数，在 `Clean` 和 `RevisionOnly` 两个分支都同步 `current.format`，`RevisionOnly` 分支**同时也同步 `unsaved_documents[id].format`**（连同已有的 `unsaved.revision` 更新，两者都描述"新磁盘基线"，语义上必须一起同步）。这一点是用户在复核时纠正的：我最初以为只字节层面等价（`encode_text` 把 `Mixed`/`Lf` 当成同一种编码结果）就够了，但真实问题在状态语义——`unsaved_documents` 里的快照会在用户切换文章再切回来时被直接安装成当前文档（`install_document`），如果 `format` 留着旧的 `Mixed` 标签，用户会看到一份 revision 明明已经是 LF 文件、却显示成 Mixed 的不一致状态。修正后 `RevisionOnly` 的完整不变量是：**只同步 revision/format 这两个磁盘基线属性，绝不覆盖 unsaved 快照里更新后的 body/frontmatter**。`session.rs` 的 `apply_saved_document` 把 `saved.format` 一并传给 `apply_successful_save`；`drafts/batch.rs` 的 `save_documents` 把 `document.format` 传给 `write_post`，用返回的 `PostWriteResult` 同步 `saved.revision`/`saved.format`。
+
+**级联到 `cloudstack-gtk`**：`window.rs` 的 `save_document_then` 把 `task_document.format` 传给后台线程里的 `posts::write_post`，完成回调里用返回的 `PostWriteResult` 构造 `saved: PostDocument { .., revision: result.revision.clone(), format: result.format }`。
+
+**5 个 `PostDocument` 字面量构造点全部加上了 `format` 字段**（10B 开始前用 Explore agent 穷举确认没有遗漏）：`posts.rs::read_post`（生产代码，来自 `decode_text`）、`save.rs::sample_document()`、`session.rs::document(id)`、`drafts/recovery.rs::document(..)`（均为测试 fixture）、`window.rs::save_document_then` 里的 `saved` 构造（生产代码，来自 `PostWriteResult`）。
+
+**残留检查**：
+```bash
+rg -n "write_post\(" --type rust | grep -v "fn write_post"   # 5 处调用点，全部已传 format / 解构 PostWriteResult
+rg -n "PostDocument\s*{" --type rust                          # 逐一核对每处字面量都带 format
+```
+
+**测试**：新增 1 个：`write_preserves_frontmatter_only_file_without_final_newline`（不变量 3 的直接回归测试：`"---\ntitle: a\n---"` 无末尾换行的 frontmatter-only 文件，读出 `body == ""` 且 `!format.has_final_newline`，原样写回后字节完全不变）。`read_write_roundtrip_and_revision`/`write_detects_external_modification` 两个既有测试改成解构 `PostWriteResult` 并额外断言 `result.format`；`cloudstack-application` 里 `apply_successful_save` 的三个既有测试补充了 `format`/`new_format` 的构造与断言，但没有新增测试函数。`cloudstack-core` 168 → **169**（+1），`cloudstack-application` 114（不变）、`cloudstack-gtk` 36（不变）、`cloudstack-renderer` 9（不变），workspace 总数 327 → **328**，与预期吻合（这一轮的改动主要是签名/字段级联和既有测试加断言，不是新增大量测试覆盖）。
 
 **10C（未开始）**：GTK 编辑器 buffer、草稿保存/恢复、create/rename 全链路的 round-trip 验证——确保从磁盘读到写回磁盘之间，非当前正在编辑的部分完全不变。
 

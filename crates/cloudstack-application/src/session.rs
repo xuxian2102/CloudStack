@@ -232,10 +232,13 @@ impl WorkspaceSession {
     /// [`crate::save::apply_successful_save`]（不复制它们的判定逻辑），按
     /// 分类结果落地 `document`/`unsaved_documents`/`dirty`。`NotCurrent` 时
     /// 什么都不碰；`Clean` 时清空 dirty、移除 unsaved 条目；`RevisionOnly`
-    /// （保存进行期间又发生了编辑）时只同步 revision，dirty 和 unsaved
-    /// 快照原样保留——这就是"旧保存 completion 不能清掉新编辑产生的 dirty"
-    /// 这条不变量的落地位置。不碰 `pending_assets`：那是会触碰磁盘的副作用，
-    /// 留给 GTK 在 `Clean` 分支里处理。
+    /// （保存进行期间又发生了编辑）时只同步 revision 和 format 这两个描述
+    /// "新磁盘基线"的属性（`unsaved_documents` 里的快照也要同步 format，不
+    /// 只是 revision——否则切换文章再切回来会展示已经过期的换行风格），
+    /// body/frontmatter/dirty 和 unsaved 快照本身原样保留——这就是"旧保存
+    /// completion 不能清掉新编辑产生的 dirty"这条不变量的落地位置。不碰
+    /// `pending_assets`：那是会触碰磁盘的副作用，留给 GTK 在 `Clean` 分支里
+    /// 处理。
     pub fn apply_saved_document(
         &mut self,
         saved: PostDocument,
@@ -257,6 +260,7 @@ impl WorkspaceSession {
             &mut self.dirty,
             &saved.id,
             &saved.revision,
+            saved.format,
             saved.raw_frontmatter,
             saved.body,
         );
@@ -417,6 +421,7 @@ impl WorkspaceSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cloudstack_core::text::{LineEnding, TextFileFormat};
 
     fn context(root: &str) -> ProjectContext {
         ProjectContext {
@@ -442,6 +447,10 @@ mod tests {
             raw_frontmatter: None,
             body: String::new(),
             revision: "rev".into(),
+            format: TextFileFormat {
+                line_ending: LineEnding::Lf,
+                has_final_newline: true,
+            },
         }
     }
 
@@ -826,9 +835,16 @@ mod tests {
     fn apply_saved_document_revision_only_keeps_dirty_when_generation_advanced() {
         let mut session = clean_session_with_document();
         session.dirty = true;
-        session
-            .unsaved_documents
-            .insert("a.md".into(), document("a.md"));
+        // unsaved snapshot 还带着保存开始前的旧磁盘格式（Mixed）和用户保存期间
+        // 打进去的新正文——两者都不该被这次保存覆盖，只有 format/revision 这两
+        // 个描述磁盘基线的属性应该跟着同步。
+        let mut unsaved = document("a.md");
+        unsaved.format = TextFileFormat {
+            line_ending: LineEnding::Mixed,
+            has_final_newline: true,
+        };
+        unsaved.body = "newer body".into();
+        session.unsaved_documents.insert("a.md".into(), unsaved);
         let epoch = session.document_epoch;
         let saved_generation = session.edit_generation;
         // 保存派发之后、完成之前又发生了一次编辑。
@@ -836,6 +852,11 @@ mod tests {
 
         let mut saved = document("a.md");
         saved.revision = "rev-2".into();
+        // write_post 落盘时把 Mixed 规范化成了 Lf——这是保存返回的新磁盘基线。
+        saved.format = TextFileFormat {
+            line_ending: LineEnding::Lf,
+            has_final_newline: true,
+        };
         let outcome = session.apply_saved_document(saved, epoch, saved_generation);
 
         assert_eq!(outcome, SaveCompletionOutcome::RevisionOnly);
@@ -844,6 +865,21 @@ mod tests {
         assert_eq!(
             session.document.as_ref().map(|d| d.revision.as_str()),
             Some("rev-2")
+        );
+        assert_eq!(
+            session.document.as_ref().map(|d| d.format.line_ending),
+            Some(LineEnding::Lf),
+            "current document 的 format 要同步成新磁盘基线"
+        );
+        let unsaved = session.unsaved_documents.get("a.md").unwrap();
+        assert_eq!(
+            unsaved.format.line_ending,
+            LineEnding::Lf,
+            "unsaved snapshot 的 format 也要跟着同步，否则切换文章再切回来会重新展示已经过期的换行风格"
+        );
+        assert_eq!(
+            unsaved.body, "newer body",
+            "unsaved snapshot 的正文不能被这次保存覆盖"
         );
     }
 

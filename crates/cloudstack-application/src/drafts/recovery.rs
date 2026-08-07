@@ -67,6 +67,7 @@ pub fn classify_recovery(document: &PostDocument, draft: &DraftDocument) -> Draf
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cloudstack_core::text::{LineEnding, TextFileFormat};
     use std::path::PathBuf;
 
     #[test]
@@ -126,6 +127,10 @@ mod tests {
             raw_frontmatter: raw_frontmatter.map(str::to_owned),
             body: body.into(),
             revision: revision.into(),
+            format: TextFileFormat {
+                line_ending: LineEnding::Lf,
+                has_final_newline: true,
+            },
         }
     }
 

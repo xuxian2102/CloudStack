@@ -28,9 +28,12 @@
 //! 一步——deterministic 的结果更容易验证，以后如果需要"多数优先"可以在这
 //! 个合同之上单独加一层。
 
+use serde::{Deserialize, Serialize};
+
 use crate::AppError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LineEnding {
     Lf,
     CrLf,
@@ -40,7 +43,8 @@ pub enum LineEnding {
 /// 读盘时观察到的原始格式。`has_final_newline` 只是记录事实，不是保存时
 /// 的强制策略——`encode_text` 不接收它，也不会用它覆盖 `text` 当前的
 /// 末尾状态，见模块文档。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TextFileFormat {
     pub line_ending: LineEnding,
     pub has_final_newline: bool,

@@ -1341,13 +1341,14 @@ fn save_document_then(
                 &task_document.id,
                 task_frontmatter.as_deref(),
                 &task_body,
+                task_document.format,
                 &task_document.revision,
             )
         },
         move |result| {
             let mut continue_after_save = false;
             match result {
-                Ok(revision) => {
+                Ok(result) => {
                     let outcome = {
                         let mut editor_state = state.borrow_mut();
                         let saved = PostDocument {
@@ -1355,7 +1356,8 @@ fn save_document_then(
                             relative_path: document.relative_path.clone(),
                             raw_frontmatter: raw_frontmatter.clone(),
                             body: body.clone(),
-                            revision: revision.clone(),
+                            revision: result.revision.clone(),
+                            format: result.format,
                         };
                         let outcome = editor_state.session.apply_saved_document(
                             saved,
