@@ -47,6 +47,7 @@
 - [ ] **路径校验仍有本地 TOCTOU 窗口**：canonicalize/符号链接检查与实际打开文件之间可能被本地进程替换。方向（仅 Linux 目标可行）：`openat2` + `RESOLVE_BENEATH`/`RESOLVE_NO_SYMLINKS`，或 `cap-std`/`rustix` 能力目录。
 - [ ] **缺少三类专门测试**：① rename 各阶段的故障注入测试（模拟崩溃/重启后验证一致性）；② porcelain 解析、Markdown URL 过滤、frontmatter lossless 修改、图片路径 percent-decode、重命名路径改写的 fuzz/property test；③ MSRV 独立 CI 任务、`cargo deny`、GitHub Actions 完整 SHA 固定。
 - [ ] **（预置 bug，非本轮引入）reference 式图片重命名会断链**：`referenced_colocated_image_files()` 会把 `![cover][hero]` + `[hero]: hello/cover.png` 这种引用式定义里的图片也纳入移动计划（用的是解析后的 `dest_url`），但 `rewrite_colocated_image_paths()` 明确跳过引用式图片（`inline_image_destination_range` 找不到就 `continue`，注释写着"引用式图片的真实 URL 位于定义处，不属于这段源码"）。结果是图片文件被移动到新目录，但 `[hero]: hello/cover.png` 这行定义还指向旧路径，链接失效。建议作为独立的 correctness fix 尽快处理，不要等到大重构——不属于这轮 P1 的崩溃恢复/编码/图片校验范畴，是重命名路径改写逻辑本身的既有 bug。
+- [ ] **编辑器 / 正式预览滚动同步延迟**（发现于 Phase 12D/12E Live Preview 性能验收，2026-08-07）：左侧 `GtkSourceView` 滚动时，右侧 WebKit 正式预览常常慢一拍才跟上；从其他程序切回 CloudStack 窗口后再滚动，右侧会先停顿一段时间才开始响应，然后才跟着动。在小文档和大文档（含 ~1 MiB）上都能复现，说明和 Live Preview 语义高亮、`apply_plan()`/`SourceIndex`（Phase 12E）无关——12E 只改了正文语义高亮的坐标解析路径，不涉及 `preview.rs` 的滚动同步，详见 `docs/LIVE_PREVIEW_V1_BASELINE.md` §8。方向：排查 `preview.rs` 里 editor↔WebKit 的滚动比例换算/消息投递/帧调度，而不是语义高亮路径。
 
 ## 新增 `cloudstack-application` crate（用户提出，2026-08-07，P1 收尾后的下一步）
 
