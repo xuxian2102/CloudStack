@@ -8,6 +8,8 @@
 
 pub mod adapter;
 pub mod analysis;
+#[cfg(test)]
+mod baseline;
 pub mod coordinates;
 mod runtime;
 pub mod tags;
