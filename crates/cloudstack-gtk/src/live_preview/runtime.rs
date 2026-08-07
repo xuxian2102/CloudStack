@@ -159,6 +159,13 @@ impl LivePreview {
             let Some(inner) = weak.upgrade() else {
                 return;
             };
+            // A stale callback must not consume the SourceId belonging to a
+            // newer debounce request, and must not start unnecessary stale
+            // analysis work -- only a still-current callback may touch
+            // `timeout` or call `Inner::start`.
+            if !inner.clock.get().is_current(ticket) {
+                return;
+            }
             inner.timeout.borrow_mut().take();
             Inner::start(&inner, source, ticket);
         });
