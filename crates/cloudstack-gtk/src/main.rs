@@ -1,4 +1,5 @@
 mod i18n;
+mod live_preview;
 mod preview;
 mod search;
 mod tasks;

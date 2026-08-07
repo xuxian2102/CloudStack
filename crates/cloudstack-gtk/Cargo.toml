@@ -26,6 +26,8 @@ fluent-bundle = "0.16.0"
 fluent-templates = "0.15.0"
 log.workspace = true
 sourceview = { package = "sourceview5", version = "0.11.2" }
+tree-sitter = "0.26"
+tree-sitter-md = { version = "0.5", features = ["parser"] }
 unic-langid = "0.9.6"
 webkit = { package = "webkit6", version = "0.6.1" }
 
