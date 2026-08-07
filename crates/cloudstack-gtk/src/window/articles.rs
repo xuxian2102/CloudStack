@@ -281,6 +281,7 @@ fn delete_post(
                     widgets.buffer.set_text(&format!("{empty_post_list}\n"));
                     state.borrow_mut().loading_buffer = false;
                     widgets.preview.clear(epoch);
+                    widgets.live_preview.clear(epoch);
                     super::frontmatter::refresh(&widgets, &state);
                     widgets
                         .window

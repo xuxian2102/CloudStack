@@ -53,13 +53,13 @@ pub struct StyleSpan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecorationPlan {
     pub document_epoch: u64,
-    pub edit_generation: u64,
+    pub generation: u64,
     pub source_len: usize,
     pub styles: Vec<StyleSpan>,
 }
 
 /// Parses `source` as Markdown and produces a full-document decoration
-/// plan. `document_epoch`/`edit_generation` are carried through unchanged —
+/// plan. `document_epoch`/`generation` are carried through unchanged —
 /// this function does no staleness checking of its own; callers compare
 /// them against current state before applying the result.
 ///
@@ -68,7 +68,7 @@ pub struct DecorationPlan {
 /// `None`) degrades to an empty style list rather than panicking, per the
 /// fail-visible invariant: no styling is a safe fallback, source text is
 /// still fully readable either way.
-pub fn analyze(source: &str, document_epoch: u64, edit_generation: u64) -> DecorationPlan {
+pub fn analyze(source: &str, document_epoch: u64, generation: u64) -> DecorationPlan {
     let mut styles = Vec::new();
 
     let mut parser = tree_sitter_md::MarkdownParser::default();
@@ -87,7 +87,7 @@ pub fn analyze(source: &str, document_epoch: u64, edit_generation: u64) -> Decor
     styles.sort_by_key(|span| span.range.start.byte);
     DecorationPlan {
         document_epoch,
-        edit_generation,
+        generation,
         source_len: source.len(),
         styles,
     }
@@ -216,7 +216,7 @@ mod tests {
     fn carries_epoch_generation_and_source_len_through_unchanged() {
         let plan = analyze("hello", 7, 42);
         assert_eq!(plan.document_epoch, 7);
-        assert_eq!(plan.edit_generation, 42);
+        assert_eq!(plan.generation, 42);
         assert_eq!(plan.source_len, 5);
     }
 

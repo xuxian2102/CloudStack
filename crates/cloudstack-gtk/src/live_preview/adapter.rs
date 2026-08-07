@@ -2,7 +2,7 @@
 //! `sourceview::Buffer`, or rejects it outright and touches nothing.
 //!
 //! This module deliberately does not know about `document_epoch`/
-//! `edit_generation` staleness, `WorkspaceSession`, debouncing, or worker
+//! `generation` staleness, `WorkspaceSession`, debouncing, or worker
 //! threads — those are Phase 12C's job. The boundary is intentional:
 //!
 //! ```text
@@ -189,7 +189,7 @@ mod tests {
         let source = "hello";
         let plan = DecorationPlan {
             document_epoch: 0,
-            edit_generation: 0,
+            generation: 0,
             source_len: source.len(),
             styles: vec![StyleSpan {
                 kind: StyleKind::Strong,
@@ -213,7 +213,7 @@ mod tests {
         let source = "hello";
         let mut plan = DecorationPlan {
             document_epoch: 0,
-            edit_generation: 0,
+            generation: 0,
             source_len: source.len(),
             styles: vec![span(StyleKind::Strong, source, 0, 3)],
         };
@@ -231,7 +231,7 @@ mod tests {
         let source = "中文";
         let mut plan = DecorationPlan {
             document_epoch: 0,
-            edit_generation: 0,
+            generation: 0,
             source_len: source.len(),
             styles: vec![span(StyleKind::Strong, source, 0, 3)],
         };
@@ -245,7 +245,7 @@ mod tests {
         let source = "hello world";
         let mut plan = DecorationPlan {
             document_epoch: 0,
-            edit_generation: 0,
+            generation: 0,
             source_len: source.len(),
             styles: vec![span(StyleKind::Strong, source, 0, 5)],
         };
@@ -259,7 +259,7 @@ mod tests {
         let source = "hello";
         let mut plan = DecorationPlan {
             document_epoch: 0,
-            edit_generation: 0,
+            generation: 0,
             source_len: source.len(),
             styles: vec![span(StyleKind::Heading(1), source, 0, 5)],
         };

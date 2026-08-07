@@ -603,6 +603,9 @@ fn show_recovery_dialog(
                 path: restore_document.relative_path.clone(),
             }));
         restore_widgets.preview.schedule(draft.body.clone(), true);
+        restore_widgets
+            .live_preview
+            .schedule(draft.body.clone(), true);
         sync_controls(&restore_widgets, &restore_state);
         super::frontmatter::refresh(&restore_widgets, &restore_state);
         restore_widgets.editor.grab_focus();

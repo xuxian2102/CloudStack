@@ -56,6 +56,7 @@ struct Widgets {
     buffer: sourceview::Buffer,
     search_panel: SearchPanel,
     preview: crate::preview::Preview,
+    live_preview: crate::live_preview::LivePreview,
     frontmatter_panel: gtk::Box,
     frontmatter_split: adw::OverlaySplitView,
     properties_button: gtk::Button,
@@ -223,6 +224,13 @@ fn build_window(application: &adw::Application) -> Widgets {
         log::warn!("GtkSourceView 没有提供 Markdown language definition");
     }
     connect_source_style(&buffer);
+    // 必须在 SearchPanel::new()（下面会创建 SearchContext）之前安装，让
+    // CloudStack 的语义 tag 优先级天然落在 GtkSource 语法高亮之上、
+    // SearchContext 懒创建的 match tag 之下——见
+    // docs/LIVE_PREVIEW_SPIKES.md §4/§9 的 tag priority 结论。一个 buffer
+    // 生命周期只在这里 install 一次，之后（文档切换、主题切换）都不会
+    // 重新 install。
+    let live_preview = crate::live_preview::LivePreview::new(&buffer);
 
     let editor = sourceview::View::builder()
         .buffer(&buffer)
@@ -351,6 +359,7 @@ fn build_window(application: &adw::Application) -> Widgets {
         buffer,
         search_panel,
         preview,
+        live_preview,
         frontmatter_panel,
         frontmatter_split,
         properties_button,
@@ -406,6 +415,7 @@ fn connect_editor(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
                 true,
             )
             .to_string();
+        widgets.live_preview.schedule(source.clone(), false);
         widgets.preview.schedule(source, false);
     });
 }
@@ -771,6 +781,7 @@ fn close_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     populate_post_list(widgets, state, &[]);
     widgets.buffer.set_text("");
     widgets.preview.clear(epoch);
+    widgets.live_preview.clear(epoch);
     widgets.frontmatter_split.set_show_sidebar(false);
     widgets
         .project_label
@@ -885,6 +896,7 @@ fn apply_opened_workspace(
     widgets.buffer.set_text(&format!("{empty_post_list}\n"));
     state.borrow_mut().loading_buffer = false;
     widgets.preview.clear(epoch);
+    widgets.live_preview.clear(epoch);
     #[cfg(feature = "e2e")]
     widgets
         .frontmatter_split
@@ -1254,6 +1266,12 @@ fn display_document(
     let epoch = editor_state.session.document_epoch();
     let context = editor_state.session.project().cloned();
     drop(editor_state);
+    // `set_text` 上面发生在 `loading_buffer = true` 期间，`connect_changed`
+    // 故意忽略了它，所以首次语义高亮不能指望走 `changed` handler——必须在
+    // 这里显式触发，而且不经过 debounce（body 已经就绪，没有什么好等的）。
+    widgets
+        .live_preview
+        .set_document(epoch, document.body.clone());
     let project_name = context
         .as_ref()
         .map(|context| project_folder_name(&context.root));
