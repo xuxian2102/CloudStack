@@ -171,16 +171,23 @@ cloudstack-gtk ───────→ cloudstack-application ─────�
 
    第 8 项完成后，application-layer 第一阶段（1～8 项）全部收尾。文章 create/rename/delete 中"执行操作后重新 `list_posts`"的组合、`EditorState → WorkspaceSession` 的最终收敛，都留给下一阶段单独排期，不在这轮范围内。
 
-### 应该迁到 core、而不是 application 的逻辑
+### 已迁入 core 的数据规则（原"应该迁到 core、而不是 application 的逻辑"，已完成）
 
-`frontmatter.rs` 里的 `parse_tags()`/`parse_date_parts()`/`days_in_month()`/`date_subtitle()` 属于数据规则，不是应用协调——当前日期计算甚至依赖了 `gtk::glib::DateMonth`，只是为了做日历合法性判断。应迁入 `cloudstack-core/src/services/frontmatter/value.rs`，用已有的 `chrono`，不要让日期有效性依赖 GLib。
+`frontmatter.rs` 里的 `parse_tags()`/日历合法性判断/`days_in_month()` 属于数据规则，不是应用协调——原来的日期计算甚至依赖了 `gtk::glib::DateMonth`，只是为了做日历合法性判断。已迁入 `cloudstack-core/src/services/frontmatter/value.rs`（`parse_tags_input`/`parse_calendar_date`/`days_in_month`），用已有的 `chrono`，不再依赖 GLib。
+
+**订正**：这里最初把整个 `parse_date_parts()` 函数和 `date_subtitle()` 也列为迁移候选，属于过度归类，实施时收窄了：
+- `date_subtitle()` 只是"空字符串 → 未设置 / 非空 → 原样显示"的纯 presentation，不搬，留在 GTK。
+- `parse_date_parts()` 本身继续留在 GTK，但收缩成一个很薄的 wrapper——只调用 core 的 `parse_calendar_date()` 判断日期是否真实存在，自己再叠加"只能选 2000 年到今天、不允许未来日期"这条编辑器控件专属的范围策略；这是当前这个日期控件的选择范围，不是 frontmatter 领域规则，以后如果产品明确规定"禁止未来日期"再升级成 domain policy。
 
 区分原则：
 * "2024-02-29 是否是有效日期" → core；
+* "一个月有多少天" → core；
 * "日期下拉框显示多少项" → GTK；
-* "项目是否允许未来发布日期" → core 配置或 application policy；
+* "只能选 2000 年到今天、不允许未来日期" → 目前是 GTK 控件自己的展示范围策略，不是 core 配置或 application policy；
 * "标签输入如何按逗号拆分并去重" → core；
 * "标签 chip 长什么样" → GTK。
+
+**完成状态**：`day_strings()`/`resize_numbered_options()`/`field_title()`/`build_date_row()`/`build_tags_row()`/`rebuild_tag_chips()` 连同全部 widget/chip 状态都留在 GTK 不动；`parse_date_parts()` 仍然存在于 GTK，只是收缩成薄 wrapper。GTK 侧移除了 `use std::collections::HashSet;` 和本地 `parse_tags()`/`days_in_month()`（含 `gtk::glib::DateMonth` 那一整块）——`rg 'HashSet|DateMonth|fn days_in_month|fn parse_tags' crates/cloudstack-gtk/src/window/frontmatter.rs` 零匹配。测试：core 新增 3 个（`tag_input_is_trimmed_deduplicated_and_empty_values_removed`、`calendar_date_rejects_invalid_dates`、`month_lengths_follow_the_gregorian_calendar`），GTK 侧原来的 3 个测试收窄成 2 个（删除已经迁移到 core 的 `tags_are_trimmed_...`，`date_parts_validate_month_lengths_and_leap_years` 改名为 `date_parts_respect_the_editor_date_range` 且只测编辑器范围策略，保留 `empty_date_has_a_clear_subtitle`）。`cloudstack-core` 174 → 177（+3），`cloudstack-gtk` 36 → 35（-1），`cloudstack-application`/`cloudstack-renderer` 不变（116/9），workspace 总数 335 → 337。这一轮之后按用户的决定，停止继续"还能不能再搬一点"式的架构清理。
 
 ### 不要因为函数是纯的就全部迁走
 

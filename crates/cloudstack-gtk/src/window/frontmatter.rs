@@ -1,10 +1,11 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
 use std::rc::Rc;
 
 use adw::prelude::*;
 use cloudstack_core::model::FieldSpec;
-use cloudstack_core::services::frontmatter::{self as frontmatter_service, FieldValue};
+use cloudstack_core::services::frontmatter::{
+    self as frontmatter_service, value as frontmatter_value, FieldValue,
+};
 
 use super::{mark_document_dirty, EditorState, Widgets};
 use crate::i18n::{self, UiMessage};
@@ -284,7 +285,10 @@ fn sync_date_options(
     let max_month = u32::try_from(if year == today.0 { today.1 } else { 12 }).unwrap_or(1);
     resize_numbered_options(month_dropdown, month_model, max_month, &month_unit);
     let month = i32::try_from(month_dropdown.selected()).unwrap_or(0) + 1;
-    let calendar_max_day = days_in_month(year, month).unwrap_or(31);
+    let calendar_max_day = u32::try_from(month)
+        .ok()
+        .and_then(|month| frontmatter_value::days_in_month(year, month))
+        .unwrap_or(31);
     let max_day = if year == today.0 && month == today.1 {
         u32::try_from(today.2).unwrap_or(1)
     } else {
@@ -395,7 +399,7 @@ fn add_tags_from_entry(
     state: &Rc<RefCell<EditorState>>,
     name: &str,
 ) {
-    let additions = parse_tags(entry.text().as_str());
+    let additions = frontmatter_value::parse_tags_input(entry.text().as_str());
     if additions.is_empty() {
         entry.set_text("");
         return;
@@ -524,54 +528,34 @@ fn append_remove_button(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     widgets.frontmatter_panel.append(&button);
 }
 
+/// 日期本身是否真实存在交给 [`frontmatter_value::parse_calendar_date`]；这里
+/// 只加编辑器控件自己的可选范围策略——只能选 2000 年到今天，不允许未来日期。
+/// 这是当前这个日期控件的选择范围，不是 frontmatter 领域规则，所以不下沉到
+/// core（以后如果产品明确规定"禁止未来日期"，可以再升级成 domain policy）。
 fn parse_date_parts(value: &str, today: (i32, i32, i32)) -> Option<(i32, i32, i32)> {
-    let mut parts = value.split('-');
-    let year = parts.next()?.parse().ok()?;
-    let month = parts.next()?.parse().ok()?;
-    let day = parts.next()?.parse().ok()?;
-    let max_day = i32::try_from(days_in_month(year, month)?).ok()?;
-    if parts.next().is_some()
-        || !(2000..=today.0).contains(&year)
-        || !(1..=12).contains(&month)
-        || !(1..=max_day).contains(&day)
-        || (year, month, day) > today
-    {
+    let (year, month, day) = frontmatter_value::parse_calendar_date(value)?;
+
+    let month = i32::try_from(month).ok()?;
+    let day = i32::try_from(day).ok()?;
+
+    if !(2000..=today.0).contains(&year) || (year, month, day) > today {
         return None;
     }
+
     Some((year, month, day))
 }
 
 fn day_strings(year: i32, month: i32, today: (i32, i32, i32), unit: &str) -> Vec<String> {
-    let calendar_max = days_in_month(year, month).unwrap_or(31);
+    let calendar_max = u32::try_from(month)
+        .ok()
+        .and_then(|month| frontmatter_value::days_in_month(year, month))
+        .unwrap_or(31);
     let maximum = if year == today.0 && month == today.1 {
         u32::try_from(today.2).unwrap_or(1)
     } else {
         calendar_max
     };
     (1..=maximum).map(|day| format!("{day} {unit}")).collect()
-}
-
-fn days_in_month(year: i32, month: i32) -> Option<u32> {
-    use gtk::glib::DateMonth;
-
-    const MONTHS: [DateMonth; 12] = [
-        DateMonth::January,
-        DateMonth::February,
-        DateMonth::March,
-        DateMonth::April,
-        DateMonth::May,
-        DateMonth::June,
-        DateMonth::July,
-        DateMonth::August,
-        DateMonth::September,
-        DateMonth::October,
-        DateMonth::November,
-        DateMonth::December,
-    ];
-    let month_index = usize::try_from(month.checked_sub(1)?).ok()?;
-    let month = *MONTHS.get(month_index)?;
-    let year = u16::try_from(year).ok()?;
-    Some(u32::from(gtk::glib::Date::days_in_month(month, year)))
 }
 
 fn date_subtitle(value: &str) -> Option<&str> {
@@ -600,27 +584,9 @@ fn field_title(field: &FieldSpec) -> String {
     }
 }
 
-fn parse_tags(text: &str) -> Vec<String> {
-    let mut seen = HashSet::new();
-    text.split(',')
-        .map(str::trim)
-        .filter(|tag| !tag.is_empty())
-        .filter(|tag| seen.insert((*tag).to_owned()))
-        .map(str::to_owned)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tags_are_trimmed_deduplicated_and_empty_values_removed() {
-        assert_eq!(
-            parse_tags(" rust, GTK, rust, ,中文 "),
-            ["rust", "GTK", "中文"]
-        );
-    }
 
     #[test]
     fn empty_date_has_a_clear_subtitle() {
@@ -629,18 +595,12 @@ mod tests {
     }
 
     #[test]
-    fn date_parts_validate_month_lengths_and_leap_years() {
+    fn date_parts_respect_the_editor_date_range() {
         let today = (2026, 8, 6);
-        assert_eq!(parse_date_parts("2024-02-29", today), Some((2024, 2, 29)));
-        assert_eq!(parse_date_parts("2025-02-29", today), None);
-        assert_eq!(parse_date_parts("2026-11-31", today), None);
         assert_eq!(parse_date_parts("1999-12-31", today), None);
         assert_eq!(parse_date_parts("2000-01-01", today), Some((2000, 1, 1)));
+        assert_eq!(parse_date_parts("2026-08-06", today), Some(today));
         assert_eq!(parse_date_parts("2026-08-07", today), None);
         assert_eq!(parse_date_parts("2027-01-01", today), None);
-        assert_eq!(days_in_month(2000, 2), Some(29));
-        assert_eq!(days_in_month(1900, 2), Some(28));
-        assert_eq!(days_in_month(2026, 0), None);
-        assert_eq!(days_in_month(2026, 13), None);
     }
 }

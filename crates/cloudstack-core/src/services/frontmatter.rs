@@ -1,3 +1,5 @@
+pub mod value;
+
 use std::path::Path;
 use std::str::FromStr;
 
