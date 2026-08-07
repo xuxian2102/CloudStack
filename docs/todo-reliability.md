@@ -220,13 +220,13 @@ fn on_save_clicked(...) {
 
 ## 后续路线：WorkspaceSession → 无损文本合同 → Live Preview（用户提出，2026-08-07，application-layer 第一阶段收尾后）
 
-**状态：阶段 9 全部完成并冻结（9A/9B/9C + 9C.1 修正）。`WorkspaceSession` 十个字段已全部私有化，`cloudstack-gtk` 不再直接读写任何一个，只通过方法和只读 getter。阶段 10～14 尚未开始。**
+**状态：阶段 9 全部完成并冻结（9A/9B/9C + 9C.1 修正）。`WorkspaceSession` 十个字段已全部私有化，`cloudstack-gtk` 不再直接读写任何一个，只通过方法和只读 getter。阶段 10 的 10A（纯 `TextFileFormat` 合同）已完成，10B/10C 及阶段 11～14 尚未开始。**
 
 顺序固定，不要跳步：
 
 ```text
 阶段 9   EditorState → WorkspaceSession（9A/9B/9C 三个提交）
-阶段 10  无损文本文件合同：EOL + 末尾换行（core）
+阶段 10  无损文本文件合同：EOL + 末尾换行（10A core 合同 / 10B PostDocument 集成 / 10C 全链路验证）
 阶段 11  Live Preview 三个技术 spike（不进 main，只留结论/ADR）
 阶段 12  Live Preview V1：语义样式，不隐藏 Markdown 标记
 阶段 13  Live Preview V2：行级 conceal
@@ -324,9 +324,33 @@ rg '\.session\.(project|posts|document|dirty|busy|document_epoch|edit_generation
 
 **测试**：新增 1 个回归测试 `git_refresh_from_previous_same_root_workspace_is_stale`（打开 `/project` → 发起刷新 → 关闭 → 重新打开同一个 `/project` → 断言旧刷新请求不再是 current），并更新了 `install_workspace_clears_previous_document_git_snapshot_and_unsaved_map` 里对 `git_refresh_generation` 保持不变的过时断言（现在会推进）。`cloudstack-application` 113 → 114（+1），`cloudstack-gtk` 不变，workspace 总数 313 → 314。
 
-### 阶段 10：无损文本文件合同
+### 阶段 10：无损文本文件合同（拆成 10A/10B/10C）
 
-做 Live Preview 前必须先定义源码到底是什么。新增 `TextFileFormat { line_ending: LineEnding, has_final_newline: bool }`（`LineEnding::{Lf, CrLf, Mixed}`）。加载时检测 EOL 和末尾换行、buffer 内统一用 `\n`；保存时恢复 LF/CRLF、按 `has_final_newline` 处理结尾、revision-safe write。Mixed EOL 不维护逐行映射——可以打开、显示格式警告、保存时规范化为项目默认或多数 EOL，不声称 mixed-EOL 完全无损。这一阶段放在 core，因为 CLI 或未来 Qt UI 同样需要。
+做 Live Preview 前必须先定义源码到底是什么。
+
+**10A（已完成）：纯 `TextFileFormat` 合同，不碰 `PostDocument`，不碰 GTK。** 新增 `crates/cloudstack-core/src/text.rs`：
+
+```rust
+pub enum LineEnding { Lf, CrLf, Mixed }
+pub struct TextFileFormat { pub line_ending: LineEnding, pub has_final_newline: bool }
+pub struct DecodedText { pub text: String, pub format: TextFileFormat }  // text 内部永远只用 LF
+
+pub fn decode_text(bytes: &[u8]) -> Result<DecodedText, AppError>;
+pub fn encode_text(text: &str, line_ending: LineEnding) -> Result<Vec<u8>, AppError>;
+```
+
+`lib.rs` 顶层加 `pub mod text;`，跟 `path_guard` 同级（不放进 `services`，因为它不碰文件系统，是纯字节 ↔ 字符串转换）。
+
+- `decode_text`：非法 UTF-8 直接报错（`AppError::Io`），不做有损猜测式解码——CloudStack 的文章/草稿本来就只支持 UTF-8。换行风格检测：单独出现、不成对的 `\r`（老式 Mac 换行）和"CRLF 与裸 LF 同时出现"都归为 `Mixed`；只有纯 CRLF 或纯 LF（含没有任何换行符的单行/空文件，默认判成 `Lf`）才归为对应的单一风格。`has_final_newline` 检查原始字节是否以 `\n` 或 `\r` 结尾（覆盖 LF/CRLF/裸 CR 三种收尾）。
+- `encode_text`：**不接收 `TextFileFormat`，只接收 `LineEnding`**——这是用户在首次提交前的复核中发现并要求修正的设计问题（见下）。先防御性地把输入按 `\r\n`→`\n`、`\r`→`\n` 归一化一遍（不假设调用方一定传纯 LF），再按 `line_ending` 决定要不要把 `\n` 换回 `\r\n`；末尾有没有换行、有几个连续空行完全由 `text` 自身内容决定，`encode_text` 不做任何加/去尾部换行的操作。`Mixed` 在 encode 时等同于 `Lf`——按用户决定的策略，混合换行的文件保存时统一规范化为 LF，不尝试恢复原始的逐行混合模式，也不引入"项目默认 EOL"或"多数优先"（那会把配置系统拖进这一步，以后如果需要可以在这个合同之上再加一层）。
+
+  **提交前修正的设计问题**：第一版 `encode_text(text, format)` 会按 `format.has_final_newline` 强制加/去 `text` 末尾的换行。这在纯 decode→encode 往返测试里看不出问题，但接入真实编辑器后是个 bug：磁盘文件原本有末尾换行，用户在 buffer 里用 Backspace 删掉它，保存时 `encode_text` 会拿旧的 `has_final_newline=true` 把刚删掉的换行加回去；反过来，用户在 EOF 按 Enter 新增的换行，也会被旧的 `has_final_newline=false` 删掉。根源是把"读盘时观察到的事实"当成了"保存时的强制指令"，而末尾换行在 source-first 编辑器里本来就是可编辑正文的一部分，不是保存层能替用户决定的格式属性；`has_final_newline` 已经完整体现在 `text` 内容本身里（`decode_text` 从不改动它），不需要也不应该在 encode 时再拿它覆盖一遍。修正为 `encode_text` 只做 EOL 风格转换，`has_final_newline` 保留在 `DecodedText.format` 里作为只读元数据（供诊断、外部文件格式变化检测等场景使用），不再传给 `encode_text`。
+
+**测试**：13 个，在原有 10 个基础上（`encode_adds_or_strips_the_final_newline_before_converting_to_crlf` 随设计修正一起删除，因为它测的正是需要修掉的旧行为）新增 4 个直接针对这处修正的测试：`encode_preserves_absent_final_newline_from_text`、`encode_preserves_multiple_trailing_newlines_from_text`（用户明确要求的两条）、`encode_does_not_reintroduce_a_final_newline_the_user_deleted`、`encode_does_not_strip_a_final_newline_the_user_added`（对称补充的两个方向，直接复现用户描述的 bug 场景）。`cloudstack-core` 155 → 168（+13），其他 crate 不变，workspace 总数 314 → 327。
+
+**10B（未开始）**：`PostDocument` 携带 `TextFileFormat`，`posts::read_post`/`write_post` 保留格式（读时记录、写时按原格式编码），revision 计算方式需要重新确认是否仍基于原始字节还是归一化后的文本。
+
+**10C（未开始）**：GTK 编辑器 buffer、草稿保存/恢复、create/rename 全链路的 round-trip 验证——确保从磁盘读到写回磁盘之间，非当前正在编辑的部分完全不变。
 
 ### 阶段 11：Live Preview 技术验证（三个互不依赖的 spike，不进 main）
 

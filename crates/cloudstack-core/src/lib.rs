@@ -6,6 +6,7 @@
 pub mod error;
 pub mod model;
 pub mod path_guard;
+pub mod text;
 
 pub mod services {
     pub mod assets;
