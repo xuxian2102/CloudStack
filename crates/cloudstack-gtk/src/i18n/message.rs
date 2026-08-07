@@ -8,6 +8,7 @@ use fluent_bundle::FluentValue;
 pub(crate) enum UiMessage {
     SaveSuccess,
     SaveSuccessWithNewerEdits,
+    MixedLineEndingWarning,
     BatchSaveSuccessContinueGit,
     GitNoAction,
     GitNoActionTooltip,
@@ -462,6 +463,7 @@ impl UiMessage {
         match self {
             Self::SaveSuccess => "save-success",
             Self::SaveSuccessWithNewerEdits => "save-success-with-newer-edits",
+            Self::MixedLineEndingWarning => "mixed-line-ending-warning",
             Self::BatchSaveSuccessContinueGit => "batch-save-success-continue-git",
             Self::GitNoAction => "git-no-action",
             Self::GitNoActionTooltip => "git-no-action-tooltip",
@@ -968,6 +970,7 @@ pub(crate) fn message_samples() -> Vec<UiMessage> {
     vec![
         UiMessage::SaveSuccess,
         UiMessage::SaveSuccessWithNewerEdits,
+        UiMessage::MixedLineEndingWarning,
         UiMessage::BatchSaveSuccessContinueGit,
         UiMessage::GitNoAction,
         UiMessage::GitNoActionTooltip,

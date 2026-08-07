@@ -1,5 +1,6 @@
 save-success = Article saved
 save-success-with-newer-edits = Article saved, but newer edits are still unsaved
+mixed-line-ending-warning = This file has mixed line endings; saving will normalize them to LF
 batch-save-success-continue-git = Unsaved articles saved; continue with the Git operation
 
 git-no-action = Up to date

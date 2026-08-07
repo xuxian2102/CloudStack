@@ -220,7 +220,7 @@ fn on_save_clicked(...) {
 
 ## 后续路线：WorkspaceSession → 无损文本合同 → Live Preview（用户提出，2026-08-07，application-layer 第一阶段收尾后）
 
-**状态：阶段 9 全部完成并冻结（9A/9B/9C + 9C.1 修正）。`WorkspaceSession` 十个字段已全部私有化，`cloudstack-gtk` 不再直接读写任何一个，只通过方法和只读 getter。阶段 10 的 10A（纯 `TextFileFormat` 合同）、10B（`PostDocument`/`read_post`/`write_post` 集成）已完成，10C 及阶段 11～14 尚未开始。**
+**状态：阶段 9 全部完成并冻结（9A/9B/9C + 9C.1 修正）。`WorkspaceSession` 十个字段已全部私有化，`cloudstack-gtk` 不再直接读写任何一个，只通过方法和只读 getter。阶段 10（10A/10B/10C）全部完成并冻结。阶段 11～14 尚未开始。**
 
 顺序固定，不要跳步：
 
@@ -381,7 +381,32 @@ rg -n "PostDocument\s*{" --type rust                          # 逐一核对每�
 
 **测试**：新增 1 个：`write_preserves_frontmatter_only_file_without_final_newline`（不变量 3 的直接回归测试：`"---\ntitle: a\n---"` 无末尾换行的 frontmatter-only 文件，读出 `body == ""` 且 `!format.has_final_newline`，原样写回后字节完全不变）。`read_write_roundtrip_and_revision`/`write_detects_external_modification` 两个既有测试改成解构 `PostWriteResult` 并额外断言 `result.format`；`cloudstack-application` 里 `apply_successful_save` 的三个既有测试补充了 `format`/`new_format` 的构造与断言，但没有新增测试函数。`cloudstack-core` 168 → **169**（+1），`cloudstack-application` 114（不变）、`cloudstack-gtk` 36（不变）、`cloudstack-renderer` 9（不变），workspace 总数 327 → **328**，与预期吻合（这一轮的改动主要是签名/字段级联和既有测试加断言，不是新增大量测试覆盖）。
 
-**10C（未开始）**：GTK 编辑器 buffer、草稿保存/恢复、create/rename 全链路的 round-trip 验证——确保从磁盘读到写回磁盘之间，非当前正在编辑的部分完全不变。
+**10C（已完成）：端到端格式保持验证 + Mixed EOL 提示。** 不引入新架构——GTK 保存路径在 10B 就已经把 `task_document.format` 传给 `write_post()`，这一轮只补测试和一个非阻塞提示。
+
+**Core round-trip 回归测试（`posts.rs`，新增 5 个）**：
+- `write_preserves_crlf_and_no_final_newline_after_edit`：CRLF、无末尾换行的 frontmatter 文章，`read_post` → 编辑正文（加一行，仍不按 Enter）→ `write_post`，断言磁盘字节精确到每个 `\r\n` 和缺失的末尾换行都原样保留。
+- `write_reflects_user_added_or_removed_final_newline`：通过真实的 `posts::write_post()`（不是 `text.rs` 里的单元测试）复现"EOF 按 Enter / Backspace"两个方向，锁定这条不变量在集成层（含 `raw_frontmatter = None` 路径）也成立，不只是 `encode_text` 单元测试里成立。
+- `write_normalizes_mixed_line_endings_to_lf_and_reports_it`：Mixed 换行文件保存后磁盘变成纯 LF，且 `PostWriteResult.format.line_ending == Lf`。
+- `revision_changes_when_only_line_ending_style_changes`：同一段文字分别以 LF、CRLF 存盘，`read_post` 出的两个 revision 必须不同——端到端验证不变量 1（revision 基于原始字节）。
+- `rename_with_image_rewrite_preserves_crlf_and_no_final_newline`：CRLF、无末尾换行、引用了同名目录图片的文章，重命名触发真正的图片路径 rewrite 分支（`old/` → `new/`），断言磁盘字节除了图片路径前缀之外逐字节不变——`rename_post` 在原始 UTF-8 字符串上做局部替换、从不经过 `encode_text`，这条测试把这个不变量锁死，防止以后有人觉得"反正有 `decode_text()`"就顺手在 rename 里也套一层，把 rename 变成一次隐式的格式规范化操作。
+
+**Draft/application 合同（新增 2 个，未改 `DraftDocument`）**：`DraftDocument` 保持不携带 `format`——它只是未保存的 `body`/`raw_frontmatter` + `base_revision`，草稿恢复时永远先从磁盘重新 `read_post()`，格式天然继承当前磁盘基线；外部编辑器只改 EOL 也会被 raw-byte revision 感知为"disk changed"。
+- `session.rs::draft_restore_snapshot_preserves_the_installed_documents_format`：安装一个 CRLF/无末尾换行的 `PostDocument` → 模拟草稿恢复对话框的 "restore" 分支（`set_current_frontmatter` + `mark_document_dirty`）→ 断言生成的 unsaved 快照仍然是 CRLF、无末尾换行，不会被恢复流程重置成默认值。
+- `drafts/batch.rs::batch_save_preserves_crlf_line_ending`：CRLF 文件走批量保存的真实 `write_post` 路径，磁盘字节和返回的 `PostWriteResult.format` 都保持 CRLF。
+
+**GTK：只加 Mixed EOL 提示，不加状态层**。`window.rs` 的 `display_document()` 在 `!dirty && document.format.line_ending == LineEnding::Mixed` 时弹一条非阻塞 `toast`（新增 `UiMessage::MixedLineEndingWarning`，走标准 i18n 路径，`zh-CN`/`en-US` 两个 catalog 都补了对应文案，`scripts/check-i18n-hardcoded.py` 复核通过）。`!dirty` 这个条件是关键：只在从磁盘干净加载时提示一次，恢复同一篇文章的 unsaved 快照（`dirty = true`）时不重复弹——用户已经在上一次干净加载时看过提示。**不提示 CRLF**（CRLF 是正常可保持的格式，不是问题），**不提示缺失末尾换行**（那是用户可编辑的正文内容，不是异常状态）。`display_document()` 本来就直接把 `decode_text` 归一化过的 `document.body` 填入 SourceView buffer，这一轮没有再做任何额外的 EOL 转换。
+
+**明确没做的事**（按用户列出的范围边界）：没有给 `DraftDocument` 加 `TextFileFormat`；没有做逐行 EOL map；没有加"项目默认换行符"设置；没有为 Mixed 保存加确认对话框（只是非阻塞 toast）；没有自动补 EOF newline；没有为了让测试更好写而改动 `rename_post`/`delete_post_with` 的实现。
+
+**测试**：新增 7 个（`cloudstack-core` +5、`cloudstack-application` +2，无既有测试改动）。`cloudstack-core` 169 → **174**，`cloudstack-application` 114 → **116**，`cloudstack-gtk` 36（不变——这一轮只加了生产代码里的一次 toast 调用，没有新增单测），`cloudstack-renderer` 9（不变），workspace 总数 328 → **335**，与预期吻合。额外跑了 `python3 scripts/check-i18n-hardcoded.py`（CI 的第一步，这次会话此前几轮都没有显式跑过，10C 引入新用户可见文案后专门确认了一遍）——零违规。
+
+至此 Phase 10 验收冻结：
+
+```text
+10A  byte ↔ normalized text contract          ✅
+10B  PostDocument/read/write integration      ✅
+10C  editor/draft/create/rename round-trip    ✅
+```
 
 ### 阶段 11：Live Preview 技术验证（三个互不依赖的 spike，不进 main）
 

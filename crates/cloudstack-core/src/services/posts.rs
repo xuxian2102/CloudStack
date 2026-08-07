@@ -950,6 +950,137 @@ mod tests {
     }
 
     #[test]
+    fn write_preserves_crlf_and_no_final_newline_after_edit() {
+        let (_dir, ctx) = ctx();
+        std::fs::write(
+            ctx.content_root.join("a.md"),
+            b"---\r\ntitle: a\r\n---\r\nbody",
+        )
+        .unwrap();
+
+        let doc = read_post(&ctx, "a.md").unwrap();
+        assert_eq!(doc.format.line_ending, LineEnding::CrLf);
+        assert!(!doc.format.has_final_newline);
+        assert_eq!(doc.body, "body");
+
+        // 用户编辑正文加了一行，但仍然没有在 EOF 按 Enter。
+        let edited_body = "body\nmore";
+        let result = write_post(
+            &ctx,
+            "a.md",
+            doc.raw_frontmatter.as_deref(),
+            edited_body,
+            doc.format,
+            &doc.revision,
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(ctx.content_root.join("a.md")).unwrap(),
+            b"---\r\ntitle: a\r\n---\r\nbody\r\nmore".to_vec(),
+            "CRLF 风格和缺失的末尾换行都必须原样保留"
+        );
+        assert_eq!(result.format.line_ending, LineEnding::CrLf);
+        assert!(!result.format.has_final_newline);
+    }
+
+    #[test]
+    fn write_reflects_user_added_or_removed_final_newline() {
+        let (_dir, ctx) = ctx();
+        std::fs::write(ctx.content_root.join("a.md"), "body").unwrap();
+        let doc = read_post(&ctx, "a.md").unwrap();
+        assert!(!doc.format.has_final_newline);
+
+        // 用户在 EOF 按了 Enter。
+        let added = write_post(&ctx, "a.md", None, "body\n", doc.format, &doc.revision).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(ctx.content_root.join("a.md")).unwrap(),
+            "body\n"
+        );
+        assert!(added.format.has_final_newline);
+
+        // 又用 Backspace 删掉。
+        let removed =
+            write_post(&ctx, "a.md", None, "body", added.format, &added.revision).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(ctx.content_root.join("a.md")).unwrap(),
+            "body"
+        );
+        assert!(!removed.format.has_final_newline);
+    }
+
+    #[test]
+    fn write_normalizes_mixed_line_endings_to_lf_and_reports_it() {
+        let (_dir, ctx) = ctx();
+        std::fs::write(ctx.content_root.join("a.md"), b"line1\r\nline2\nline3\r\n").unwrap();
+        let doc = read_post(&ctx, "a.md").unwrap();
+        assert_eq!(doc.format.line_ending, LineEnding::Mixed);
+
+        let result = write_post(
+            &ctx,
+            "a.md",
+            doc.raw_frontmatter.as_deref(),
+            &doc.body,
+            doc.format,
+            &doc.revision,
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(ctx.content_root.join("a.md")).unwrap(),
+            "line1\nline2\nline3\n"
+        );
+        assert_eq!(
+            result.format.line_ending,
+            LineEnding::Lf,
+            "保存后返回的 format 必须反映实际落盘的字节，不是调用方传入的旧 Mixed"
+        );
+    }
+
+    #[test]
+    fn revision_changes_when_only_line_ending_style_changes() {
+        let (_dir, ctx) = ctx();
+        std::fs::write(ctx.content_root.join("a.md"), "line1\nline2\n").unwrap();
+        let lf_revision = read_post(&ctx, "a.md").unwrap().revision;
+
+        std::fs::write(ctx.content_root.join("a.md"), "line1\r\nline2\r\n").unwrap();
+        let crlf_revision = read_post(&ctx, "a.md").unwrap().revision;
+
+        assert_ne!(
+            lf_revision, crlf_revision,
+            "revision 必须基于原始字节计算，纯 EOL 风格变化也要能被检测为外部修改"
+        );
+    }
+
+    #[test]
+    fn rename_with_image_rewrite_preserves_crlf_and_no_final_newline() {
+        let (_dir, ctx) = ctx();
+        // 无 frontmatter、CRLF 换行、EOF 没有换行，正文引用了同名目录下的图片。
+        std::fs::write(
+            ctx.content_root.join("old.md"),
+            b"![img](old/p.png)\r\nnext",
+        )
+        .unwrap();
+        fs::create_dir_all(ctx.content_root.join("old")).unwrap();
+        fs::write(ctx.content_root.join("old/p.png"), "img").unwrap();
+
+        let doc = rename_current(&ctx, "old.md", "new.md").unwrap();
+
+        // rename 只应该改写图片路径，不应该顺带把 CRLF 规范化成 LF 或补上末尾换行。
+        assert_eq!(
+            std::fs::read(ctx.content_root.join("new.md")).unwrap(),
+            b"![img](new/p.png)\r\nnext".to_vec(),
+            "rename 的图片路径重写不能顺带做 EOL 归一化"
+        );
+        assert!(ctx.content_root.join("new/p.png").is_file());
+
+        // 重新读回来的 PostDocument 也要如实反映磁盘上仍然是 CRLF、没有末尾换行。
+        assert_eq!(doc.format.line_ending, LineEnding::CrLf);
+        assert!(!doc.format.has_final_newline);
+        assert_eq!(doc.body, "![img](new/p.png)\nnext");
+    }
+
+    #[test]
     fn rename_post_moves_asset_dir_when_present() {
         let (_dir, ctx) = ctx();
         create_post(&ctx, "hello.md", None, "![](hello/cover.png)\n").unwrap();

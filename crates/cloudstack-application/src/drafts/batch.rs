@@ -95,6 +95,7 @@ pub fn discard_documents(
 mod tests {
     use super::*;
     use cloudstack_core::model::ProjectConfig;
+    use cloudstack_core::text::LineEnding;
 
     fn fixture() -> (
         tempfile::TempDir,
@@ -123,6 +124,26 @@ mod tests {
         storage
             .write(context, post_id, None, body.to_owned(), "revision".into())
             .unwrap();
+    }
+
+    #[test]
+    fn batch_save_preserves_crlf_line_ending() {
+        let (project, _app_data, context, storage) = fixture();
+        std::fs::write(context.root.join("a.md"), "line1\r\nline2\r\n").unwrap();
+        let mut document = posts::read_post(&context, "a.md").unwrap();
+        assert_eq!(document.format.line_ending, LineEnding::CrLf);
+        document.body = format!("{}line3\n", document.body);
+
+        let report = save_documents(&storage, &context, vec![document]);
+
+        assert!(report.failed.is_empty());
+        assert_eq!(report.saved.len(), 1);
+        assert_eq!(
+            std::fs::read(project.path().join("a.md")).unwrap(),
+            b"line1\r\nline2\r\nline3\r\n".to_vec(),
+            "批量保存必须保留 CRLF 换行风格，不能规范化成 LF"
+        );
+        assert_eq!(report.saved[0].format.line_ending, LineEnding::CrLf);
     }
 
     #[test]

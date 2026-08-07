@@ -1,5 +1,6 @@
 save-success = 文章已保存
 save-success-with-newer-edits = 文章已保存，但编辑器里还有更新的修改未保存
+mixed-line-ending-warning = 此文件包含混合换行；保存时将规范化为 LF
 batch-save-success-continue-git = 未保存文章已保存，请继续执行 Git 操作
 
 git-no-action = 已同步

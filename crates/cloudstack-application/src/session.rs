@@ -808,6 +808,35 @@ mod tests {
     }
 
     #[test]
+    fn draft_restore_snapshot_preserves_the_installed_documents_format() {
+        // 模拟草稿恢复对话框的 "restore" 分支：当前文档是从磁盘读到的 CRLF、
+        // 无末尾换行的文件，恢复只应该换 frontmatter/body，不该重置格式。
+        let mut session = clean_session_with_document();
+        let mut crlf_document = document("a.md");
+        crlf_document.format = TextFileFormat {
+            line_ending: LineEnding::CrLf,
+            has_final_newline: false,
+        };
+        session.document = Some(crlf_document);
+
+        session.set_current_frontmatter(Some("title: restored".into()));
+        session.mark_document_dirty("restored body".into());
+
+        let unsaved = session
+            .unsaved_documents
+            .get("a.md")
+            .expect("草稿恢复应该记录一份 unsaved 快照");
+        assert_eq!(
+            unsaved.format.line_ending,
+            LineEnding::CrLf,
+            "unsaved 快照应该继承当前文档的磁盘格式，不能被重置成默认值"
+        );
+        assert!(!unsaved.format.has_final_newline);
+        assert_eq!(unsaved.body, "restored body");
+        assert_eq!(unsaved.raw_frontmatter.as_deref(), Some("title: restored"));
+    }
+
+    #[test]
     fn apply_saved_document_clean_clears_dirty_and_removes_unsaved_entry() {
         let mut session = clean_session_with_document();
         session.dirty = true;

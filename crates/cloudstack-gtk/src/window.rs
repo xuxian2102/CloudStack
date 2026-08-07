@@ -17,6 +17,7 @@ use cloudstack_core::model::{PostDocument, PostSummary, ProjectContext};
 use cloudstack_core::services::assets::PendingAssetManager;
 use cloudstack_core::services::operations::RecoveredRename;
 use cloudstack_core::services::{assets, git, posts, project};
+use cloudstack_core::text::LineEnding;
 use gtk::{gdk, gio, glib};
 use sourceview::prelude::*;
 
@@ -1237,6 +1238,11 @@ fn display_document(
     }
     widgets.buffer.set_text(&document.body);
     widgets.editor.grab_focus();
+    // 只在从磁盘干净加载时提示——恢复 unsaved snapshot（dirty=true）时格式
+    // 早就在上一次加载时提示过，不需要每次切换回同一篇文章都重复弹一次。
+    if !dirty && document.format.line_ending == LineEnding::Mixed {
+        toast(widgets, &i18n::text(UiMessage::MixedLineEndingWarning));
+    }
     let status = if dirty {
         format!("{} · 未保存", document.relative_path)
     } else {
