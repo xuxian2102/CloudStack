@@ -235,6 +235,7 @@ mod tests {
                     },
                 },
             }],
+            conceals: Vec::new(),
         };
         assert!(!validate_plan(source, &plan));
     }
@@ -247,6 +248,7 @@ mod tests {
             generation: 0,
             source_len: source.len(),
             styles: vec![span(StyleKind::Strong, source, 0, 3)],
+            conceals: Vec::new(),
         };
         // 手动构造一个 start > end 的反向 range——真实 analyze() 永远不会
         // 产出这种东西，这里就是在验证"就算它出现了也会被拒绝"。
@@ -265,6 +267,7 @@ mod tests {
             generation: 0,
             source_len: source.len(),
             styles: vec![span(StyleKind::Strong, source, 0, 3)],
+            conceals: Vec::new(),
         };
         // "中" 是 3 字节；把 end 手动改到字符中间。
         plan.styles[0].range.end.byte = 1;
@@ -279,6 +282,7 @@ mod tests {
             generation: 0,
             source_len: source.len(),
             styles: vec![span(StyleKind::Strong, source, 0, 5)],
+            conceals: Vec::new(),
         };
         // point 和 byte 两个坐标现在互相矛盾。
         plan.styles[0].range.start.point = point(0, 6);
@@ -293,6 +297,7 @@ mod tests {
             generation: 0,
             source_len: source.len(),
             styles: vec![span(StyleKind::Heading(1), source, 0, 5)],
+            conceals: Vec::new(),
         };
         plan.styles[0].kind = StyleKind::Heading(0);
         assert!(!validate_plan(source, &plan));
