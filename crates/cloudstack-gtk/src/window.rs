@@ -26,8 +26,7 @@ use crate::tasks;
 use cloudstack_application::session::WorkspaceSession;
 use cloudstack_application::workspace::{open_workspace, OpenWorkspaceOutcome};
 use cloudstack_application::{
-    apply_successful_save, capabilities_for, classify_save_completion, SaveCompletionOutcome,
-    WorkspaceCapabilities, WorkspaceCapabilitiesInput,
+    capabilities_for, SaveCompletionOutcome, WorkspaceCapabilities, WorkspaceCapabilitiesInput,
 };
 
 const DEFAULT_EDITOR_PANE_WIDTH: i32 = 570;
@@ -768,13 +767,8 @@ fn close_project(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
     retry_pending_asset_cleanup(state);
 
     let mut editor_state = state.borrow_mut();
-    editor_state.session.project = None;
-    editor_state.session.posts.clear();
-    editor_state.session.document = None;
-    editor_state.session.dirty = false;
-    editor_state.session.git_snapshot = None;
-    editor_state.session.document_epoch = editor_state.session.document_epoch.wrapping_add(1);
-    let epoch = editor_state.session.document_epoch;
+    let closed = editor_state.session.close_workspace();
+    let epoch = closed.document_epoch;
     drop(editor_state);
 
     populate_post_list(widgets, state, &[]);
@@ -883,14 +877,10 @@ fn apply_opened_workspace(
         }));
     let mut editor_state = state.borrow_mut();
     editor_state.loading_buffer = true;
-    editor_state.session.project = Some(context);
-    editor_state.session.git_snapshot = None;
-    editor_state.session.posts = post_summaries;
-    editor_state.session.document = None;
-    editor_state.session.dirty = false;
-    editor_state.session.unsaved_documents.clear();
-    editor_state.session.document_epoch = editor_state.session.document_epoch.wrapping_add(1);
-    let epoch = editor_state.session.document_epoch;
+    let installed = editor_state
+        .session
+        .install_workspace(context, post_summaries);
+    let epoch = installed.document_epoch;
     drop(editor_state);
     let post_summaries = state.borrow().session.posts.clone();
     populate_post_list(widgets, state, &post_summaries);
@@ -1252,9 +1242,7 @@ fn display_document(
     {
         let mut state = state.borrow_mut();
         state.loading_buffer = true;
-        state.session.document = Some(document.clone());
-        state.session.dirty = dirty;
-        state.session.document_epoch = state.session.document_epoch.wrapping_add(1);
+        state.session.install_document(document.clone(), dirty);
     }
     widgets.buffer.set_text(&document.body);
     widgets.editor.grab_focus();
@@ -1367,30 +1355,18 @@ fn save_document_then(
             match result {
                 Ok(revision) => {
                     let outcome = {
-                        let mut editor_state_ref = state.borrow_mut();
-                        let editor_state: &mut EditorState = &mut editor_state_ref;
-                        let current_id = editor_state
-                            .session
-                            .document
-                            .as_ref()
-                            .map(|current| current.id.as_str());
-                        let outcome = classify_save_completion(
-                            current_id,
-                            &document.id,
-                            editor_state.session.document_epoch,
+                        let mut editor_state = state.borrow_mut();
+                        let saved = PostDocument {
+                            id: document.id.clone(),
+                            relative_path: document.relative_path.clone(),
+                            raw_frontmatter: raw_frontmatter.clone(),
+                            body: body.clone(),
+                            revision: revision.clone(),
+                        };
+                        let outcome = editor_state.session.apply_saved_document(
+                            saved,
                             saved_document_epoch,
-                            editor_state.session.edit_generation,
                             saved_generation,
-                        );
-                        apply_successful_save(
-                            outcome,
-                            &mut editor_state.session.document,
-                            &mut editor_state.session.unsaved_documents,
-                            &mut editor_state.session.dirty,
-                            &document.id,
-                            &revision,
-                            raw_frontmatter.clone(),
-                            body.clone(),
                         );
                         if matches!(outcome, SaveCompletionOutcome::Clean) {
                             if let Err(error) = editor_state.pending_assets.reconcile_saved_post(
@@ -1431,31 +1407,18 @@ fn save_document_then(
 }
 
 fn mark_document_dirty(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
-    let post_id = {
-        let body = widgets
-            .buffer
-            .text(
-                &widgets.buffer.start_iter(),
-                &widgets.buffer.end_iter(),
-                true,
-            )
-            .to_string();
-        let mut state = state.borrow_mut();
-        let Some(document) = state.session.document.clone() else {
-            return;
-        };
-        state.session.dirty = true;
-        state.session.edit_generation = state.session.edit_generation.wrapping_add(1);
-        let mut snapshot = document;
-        snapshot.body = body;
-        let post_id = snapshot.id.clone();
-        state
-            .session
-            .unsaved_documents
-            .insert(post_id.clone(), snapshot);
-        post_id
+    let body = widgets
+        .buffer
+        .text(
+            &widgets.buffer.start_iter(),
+            &widgets.buffer.end_iter(),
+            true,
+        )
+        .to_string();
+    let Some(dirty) = state.borrow_mut().session.mark_document_dirty(body) else {
+        return;
     };
-    update_post_marker(widgets, state, &post_id);
+    update_post_marker(widgets, state, &dirty.post_id);
     sync_controls(widgets, state);
     if let Some(document) = &state.borrow().session.document {
         widgets

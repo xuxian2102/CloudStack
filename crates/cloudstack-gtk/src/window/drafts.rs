@@ -423,24 +423,8 @@ fn complete_batch_save(
                     log::warn!("保存后清理待提交图片失败：{error}");
                 }
             }
-            editor_state.session.unsaved_documents.remove(&document.id);
-            if editor_state
-                .session
-                .document
-                .as_ref()
-                .is_some_and(|current| current.id == document.id)
-            {
-                editor_state.session.document = Some(document.clone());
-            }
         }
-        let current_id = editor_state
-            .session
-            .document
-            .as_ref()
-            .map(|document| document.id.clone());
-        editor_state.session.dirty = current_id
-            .as_deref()
-            .is_some_and(|post_id| editor_state.session.unsaved_documents.contains_key(post_id));
+        editor_state.session.apply_batch_saved(&report.saved);
     }
     for post_id in &saved_ids {
         super::update_post_marker(widgets, state, post_id);
@@ -495,20 +479,10 @@ fn complete_discard(
     report: DiscardReport,
 ) -> bool {
     let discarded_ids = report.discarded.clone();
-    {
-        let mut editor_state = state.borrow_mut();
-        for post_id in &discarded_ids {
-            editor_state.session.unsaved_documents.remove(post_id);
-        }
-        let current_id = editor_state
-            .session
-            .document
-            .as_ref()
-            .map(|document| document.id.clone());
-        editor_state.session.dirty = current_id
-            .as_deref()
-            .is_some_and(|post_id| editor_state.session.unsaved_documents.contains_key(post_id));
-    }
+    state
+        .borrow_mut()
+        .session
+        .discard_unsaved_documents(&discarded_ids);
     for post_id in &discarded_ids {
         super::update_post_marker(widgets, state, post_id);
     }
@@ -621,16 +595,15 @@ fn show_recovery_dialog(
         {
             let mut state = restore_state.borrow_mut();
             state.loading_buffer = true;
-            if let Some(document) = state.session.document.as_mut() {
-                document.raw_frontmatter.clone_from(&draft.raw_frontmatter);
-            }
+            state
+                .session
+                .set_current_frontmatter(draft.raw_frontmatter.clone());
         }
         restore_widgets.buffer.set_text(&draft.body);
-        {
-            let mut state = restore_state.borrow_mut();
-            state.loading_buffer = false;
-            state.session.dirty = true;
-        }
+        restore_state.borrow_mut().loading_buffer = false;
+        // mark_document_dirty() 会设置 dirty、推进 edit_generation、把当前
+        // buffer（已经是 draft.body）连同上面刚设置的 frontmatter 一起写进
+        // unsaved_documents 快照，不需要在这里单独再设一次 dirty。
         super::mark_document_dirty(&restore_widgets, &restore_state);
         restore_widgets
             .status_label

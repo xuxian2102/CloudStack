@@ -91,7 +91,7 @@ fn create_post(
             match result {
                 Ok((document, summaries)) => {
                     populate_post_list(&widgets, &state, &summaries);
-                    state.borrow_mut().session.posts = summaries;
+                    state.borrow_mut().session.replace_posts(summaries);
                     display_document(&widgets, &state, document, false);
                     toast(&widgets, &i18n::text(UiMessage::ArticleCreated));
                 }
@@ -190,7 +190,8 @@ fn rename_post(
                 Ok((renamed, summaries)) => {
                     populate_post_list(&widgets, &state, &summaries);
                     let mut editor_state = state.borrow_mut();
-                    editor_state.session.posts = summaries;
+                    editor_state.session.replace_posts(summaries);
+                    editor_state.session.remove_unsaved_document(&old_id);
                     editor_state
                         .pending_assets
                         .forget_post(&context.root, &old_id);
@@ -266,12 +267,10 @@ fn delete_post(
                 Ok(summaries) => {
                     populate_post_list(&widgets, &state, &summaries);
                     let mut editor_state = state.borrow_mut();
-                    editor_state.session.posts = summaries;
-                    editor_state.session.document = None;
-                    editor_state.session.dirty = false;
-                    editor_state.session.document_epoch =
-                        editor_state.session.document_epoch.wrapping_add(1);
-                    let epoch = editor_state.session.document_epoch;
+                    editor_state.session.replace_posts(summaries);
+                    let cleared = editor_state.session.clear_document();
+                    let epoch = cleared.document_epoch;
+                    editor_state.session.remove_unsaved_document(&post_id);
                     editor_state
                         .pending_assets
                         .forget_post(&context.root, &post_id);

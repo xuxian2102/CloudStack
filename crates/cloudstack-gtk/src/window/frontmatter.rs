@@ -46,9 +46,10 @@ pub(super) fn refresh(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
         let callback_state = Rc::clone(state);
         add_button.connect_clicked(move |_| {
             let raw = frontmatter_service::initial_for_post(&fields, &post_id).unwrap_or_default();
-            if let Some(document) = callback_state.borrow_mut().session.document.as_mut() {
-                document.raw_frontmatter = Some(raw);
-            }
+            callback_state
+                .borrow_mut()
+                .session
+                .set_current_frontmatter(Some(raw));
             mark_document_dirty(&callback_widgets, &callback_state);
             refresh(&callback_widgets, &callback_state);
         });
@@ -479,9 +480,10 @@ fn update_field(
     };
     match frontmatter_service::set_field(&raw_frontmatter, name, value) {
         Ok(raw) => {
-            if let Some(document) = state.borrow_mut().session.document.as_mut() {
-                document.raw_frontmatter = Some(raw);
-            }
+            state
+                .borrow_mut()
+                .session
+                .set_current_frontmatter(Some(raw));
             mark_document_dirty(widgets, state);
         }
         Err(error) => super::show_user_facing_error(widgets, &error),
@@ -511,9 +513,10 @@ fn append_remove_button(widgets: &Widgets, state: &Rc<RefCell<EditorState>>) {
         let response_widgets = callback_widgets.clone();
         let response_state = Rc::clone(&callback_state);
         dialog.connect_response(Some("remove"), move |_, _| {
-            if let Some(document) = response_state.borrow_mut().session.document.as_mut() {
-                document.raw_frontmatter = None;
-            }
+            response_state
+                .borrow_mut()
+                .session
+                .set_current_frontmatter(None);
             mark_document_dirty(&response_widgets, &response_state);
             refresh(&response_widgets, &response_state);
         });

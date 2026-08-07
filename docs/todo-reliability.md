@@ -220,7 +220,7 @@ fn on_save_clicked(...) {
 
 ## 后续路线：WorkspaceSession → 无损文本合同 → Live Preview（用户提出，2026-08-07，application-layer 第一阶段收尾后）
 
-**状态：阶段 9（9A）已完成，9B/9C 及阶段 10～14 尚未开始。**
+**状态：阶段 9（9A）已完成；9B 的三个生命周期簇（workspace/document/save-dirty）全部完成，9B 收尾。9C 及阶段 10～14 尚未开始。**
 
 顺序固定，不要跳步：
 
@@ -247,14 +247,54 @@ GTK 的 `EditorState` 改成只剩 `session: WorkspaceSession` + `loading_buffer
 
 **验收**：`EditorState` 现在只有 `session`/`loading_buffer`/`draft_queue`/`pending_assets` 四个字段，不再直接拥有原来的十个字段；`cargo tree -p cloudstack-application --edges normal` 确认仍然只依赖 `cloudstack-core`。这一轮是纯结构迁移，没有新增或删除任何测试——workspace 总数维持 280（application 80、core 155、gtk 36、renderer 9）不变，与预期完全吻合。
 
-**9B（未开始）：把状态转换收进 Session。** 字段迁完并全绿后，给 `WorkspaceSession` 加方法：`install_workspace`/`close_workspace`/`install_document`/`mark_document_dirty`/`apply_saved_document`/`remove_document`/`replace_posts`，返回值只包含 GTK 展示所需信息（如 `WorkspaceInstalled { document_epoch }`、`DocumentDirtyOutcome { edit_generation, became_dirty }`），application 不调用任何 GTK。必须用测试固定的语义：
-1. 打开新 workspace 会清空旧文档、Git snapshot 和 unsaved map；
-2. 打开/关闭 workspace 都推进 `document_epoch`；
+**9B：把状态转换收进 Session，按三个语义簇分批做（用户提出，不要一次把所有字段的读写都换成方法）。**
+
+**workspace 生命周期簇（已完成）**：`WorkspaceSession` 新增 `install_workspace(context, posts) -> WorkspaceInstalled { document_epoch }`、`close_workspace() -> WorkspaceClosed { document_epoch }`、`replace_posts(posts)`。三个方法分别对应 GTK 原来的三处内联逻辑：
+- `install_workspace`：替换 `apply_opened_workspace()` 里"安装 project/posts、清空 document/dirty/git_snapshot/unsaved_documents、推进 document_epoch"那一整块；不触碰 `edit_generation`/`git_refresh_generation`——两者分别只在编辑和 Git 刷新时才有意义。
+- `close_workspace`：替换 `close_project()` 里对应的清空块；`unsaved_documents.clear()` 仍然防御性地执行一遍（正常情况下调用前已经由 `ensure_no_unsaved_documents` 保证是空的，`.clear()` 在这种情况下是幂等的，不改变行为）。
+- `replace_posts`：只替换 `posts`，不碰其他字段——对应 `articles.rs` 里 `create_post`/`rename_post` 完成后刷新文章列表的两处调用点。
+
+**明确没有迁移的地方**：`articles.rs` 的 `delete_post()` 里"替换 posts + 清空 document/dirty + 推进 document_epoch"那一整块（因为删除的是当前正打开的文章）**保持原样、继续直接读写 `.session.*` 字段**——这是一个"清空当前文档"的转换，语义上属于 document 生命周期簇，不属于这一轮的 workspace 生命周期范围，留到下一批一起设计（避免 `replace_posts` 和"清空当前文档"的语义在这一轮混在一起）。
+
+**测试**：新增 5 个——`install_workspace_clears_previous_document_git_snapshot_and_unsaved_map`、`install_workspace_advances_document_epoch`、`close_workspace_clears_project_state_and_advances_epoch`、`close_workspace_is_idempotent_when_already_empty`、`replace_posts_only_replaces_the_list`。冻结了原计划 7 条语义里跟 workspace 生命周期直接相关的两条（打开新 workspace 会清空旧文档/Git snapshot/unsaved map；打开/关闭 workspace 都推进 `document_epoch`）。`cloudstack-application` 80 → 85（+5），`cloudstack-gtk` 不变，workspace 总数 280 → 285，与预期吻合（这一批之前没有预先给出精确测试数预测，5 个是按上述语义反推出来的自然数量）。
+
+剩下 5 条语义留给后面两个簇验证：
 3. 切换文章时保留其他文章的未保存快照；
 4. 编辑后 `edit_generation` 推进；
 5. 保存期间又发生编辑，旧保存 completion 不能清掉 dirty；
 6. 删除或重命名文章时，unsaved map 不残留旧 ID；
 7. 安装文档不能错误地继承上一篇文章的 dirty 状态。
+
+**document 生命周期簇（已完成）**：`WorkspaceSession` 新增 `install_document(document, dirty) -> DocumentInstalled { document_epoch }`、`clear_document() -> DocumentCleared { document_epoch }`、`remove_document(post_id)`（save/dirty 簇收尾时改名为 `remove_unsaved_document`，见下）。
+
+- `install_document`：替换 `display_document()` 里"安装 document、设置 dirty、推进 document_epoch"那一小块。`dirty` 是显式参数（不是从上一篇文档继承），覆盖语义 7——两个方向都测了：上一篇 dirty 切到新文档传 `dirty=false` 必须变干净，上一篇干净切到"恢复未保存快照"传 `dirty=true` 必须变脏。不触碰 `unsaved_documents`：其他文章的未保存快照是 `mark_document_dirty`（save/dirty 簇，未做）持续写入的，不是切换文档时才快照一次，所以"切换文章保留其他未保存快照"（语义 3）天然成立，测试只需要证明这个方法完全不碰那张表。
+- **一处规格之外的新增**：原始方法列表没有覆盖"删除当前正打开的文章"这个转换（`install_document` 只接收非空 `PostDocument`，装不下"清空"）。新增 `clear_document()`，只清 `document`/`dirty` 并推进 `document_epoch`，不碰 `posts`/`project`/`unsaved_documents`——这三者分别由 `replace_posts`/`remove_document` 处理。这是把 7A 结尾故意留下的 `delete_post()` 内联块（当时写明"这是一个清空当前文档的转换，语义上属于 document 生命周期簇"）迁移完整所必需的，不是范围蔓延。
+- `remove_document`：从 `unsaved_documents` 移除指定 id。`delete_post()`/`rename_post()` 分别在删除/重命名成功后对旧 id 调用它，覆盖语义 6。GTK 当前的删除/重命名入口在有任何未保存文章时就整体拒绝操作，所以实际调用时这个 id 通常已经不在表里——显式调用把"删除/重命名不残留旧 id"这个不变量写成代码，不再隐式依赖调用方的守卫逻辑。
+
+GTK 侧：`display_document()`（window.rs）改用 `install_document`；`articles.rs` 的 `delete_post()` 改用 `replace_posts` + `clear_document` + `remove_document`（原来的四行直接字段赋值合并成三次方法调用）；`rename_post()` 补上 `remove_document(&old_id)`。`drafts.rs` 的 `complete_batch_save`/`complete_discard`/草稿恢复对话框的 "restore" 分支，以及 `window.rs` 的 `mark_document_dirty()`，仍然直接读写 `.session.dirty`/`.session.document`——这些是 save/dirty 生命周期簇的范围，这一轮没有碰。
+
+**测试**：新增 7 个：`install_document_replaces_current_document_and_advances_epoch`、`install_document_does_not_inherit_previous_dirty_state`、`install_document_does_not_touch_posts_or_other_unsaved_snapshots`、`clear_document_resets_current_document_and_advances_epoch`、`clear_document_does_not_touch_posts_project_or_unsaved_documents`、`remove_document_removes_only_the_given_entry`、`remove_document_is_a_noop_when_absent`。覆盖了原计划 7 条语义里的第 3/6/7 条。`cloudstack-application` 85 → 92（+7），`cloudstack-gtk` 不变，workspace 总数 285 → 292，与预期吻合。
+
+**save/dirty 生命周期簇（已完成）**：`WorkspaceSession` 新增 `mark_document_dirty(body) -> Option<DocumentDirty>`、`set_current_frontmatter(raw_frontmatter) -> bool`、`apply_saved_document(saved, saved_document_epoch, saved_generation) -> SaveCompletionOutcome`、`apply_batch_saved(saved)`、`discard_unsaved_documents(discarded_ids)`；`remove_document` 按用户要求改名为 `remove_unsaved_document`（同一个类型里已经有 `install_document`/`clear_document`，`remove_document` 容易被误读成"删除当前文档"）。
+
+- `mark_document_dirty`：`dirty = true` + `edit_generation` 推进 + 把最新正文快照写入 `unsaved_documents`（覆盖同 id 旧快照）。没有当前文档时返回 `None`，对应原 GTK 函数开头的提前返回。覆盖语义 4，以及"第二次编辑覆盖同 id 快照"。
+- `set_current_frontmatter`：只改当前文档的 `raw_frontmatter`，不推进 generation、不写 `unsaved_documents`——frontmatter 变更后紧接着要用最新 buffer 正文调用一次 `mark_document_dirty`，两者一起才构成"未保存快照同时包含新 frontmatter 和新正文"。
+- `apply_saved_document`：**复用**（不是复制）`crate::save::classify_save_completion`/`apply_successful_save`（第 1 轮就迁移到 application 的既有纯函数），只是把它们包进 `WorkspaceSession` 的方法，调用方不用再从 `EditorState` 里手工拆三个 `&mut` 字段传进去。覆盖语义 5（保存期间又编辑，`RevisionOnly` 分类下 dirty/unsaved 快照原样保留）和"保存旧 document epoch 不覆盖当前文档"（`NotCurrent` 分类）。不碰 `pending_assets`——那是会触碰磁盘的副作用，留在 GTK 的 `Clean` 分支处理。
+- `apply_batch_saved`/`discard_unsaved_documents`：两者共享同一条私有规则 `recompute_dirty_from_unsaved`（"当前文档 id 是否仍在 `unsaved_documents` 里"）。`apply_batch_saved` 另外把成功保存的文档换成新副本（同步 revision/body/frontmatter）；部分失败的批量保存只清成功项，失败项原样留在 `unsaved_documents` 里，如果失败的正是当前文档，`dirty` 保持 true。不碰 `pending_assets`，理由同上。
+
+GTK 侧：`mark_document_dirty()`（window.rs）改成读 buffer → `session.mark_document_dirty(body)` → 用返回的 `post_id` 更新侧栏标记，三个直接字段赋值（`dirty`/`edit_generation`/`unsaved_documents.insert`）合并成一次方法调用。`save_document_then()` 改成构造一个 `PostDocument`（`id`/`relative_path`/`raw_frontmatter`/`body` 来自保存开始时的快照，`revision` 是 `write_post` 返回的新值）传给 `session.apply_saved_document(...)`，不再直接调用 `classify_save_completion`/`apply_successful_save`（这两个纯函数还在 `save.rs` 里，只是不再被 GTK 直接引用，改由 `apply_saved_document` 内部调用）。`frontmatter.rs` 的三条路径（新增/修改字段/删除 frontmatter）全部把 `.session.document.as_mut()` 改成 `set_current_frontmatter(...)`，紧接着仍然调用（未参数化的）GTK 包装函数 `mark_document_dirty(widgets, state)`。`drafts.rs` 的 `complete_batch_save`/`complete_discard` 分别改成调用 `apply_batch_saved`/`discard_unsaved_documents`（`pending_assets.reconcile_saved_post` 的调用拆成独立的前置循环，跟 session 更新不再交错，观察行为不变，因为两者在原代码里也没有数据依赖）。草稿恢复对话框的 "restore" 分支改成 `set_current_frontmatter(...)` → `buffer.set_text(...)` → 调用 GTK 的 `mark_document_dirty()`，**删除了一处原来重复的 `state.session.dirty = true;`**——原代码在这行之后紧接着调用 `mark_document_dirty()`，后者本身就会设置 `dirty` 并推进 `edit_generation`，前一次赋值完全是死代码（已用 CI 全绿确认删除它不改变任何可观察行为）。
+
+**残留检查**（用户指定）：
+```bash
+rg '\.session\.(document|dirty|edit_generation|unsaved_documents)\s*=' crates/cloudstack-gtk
+rg '\.session\.document\.as_mut\(' crates/cloudstack-gtk
+rg '\.session\.unsaved_documents\.(insert|remove|clear)' crates/cloudstack-gtk
+```
+三条全部为空——GTK 现在不再直接赋值/直接调用这四个字段的可变方法，只保留只读访问（例如 `if let Some(document) = &state.session.document`）。`.session.git_refresh_generation = ...` 仍然存在（`git_panel.rs`），按用户明确的决定不在 9B 收进方法，留给 9C。
+
+**测试**：新增 11 个：`mark_document_dirty_advances_generation_and_snapshots_body`、`mark_document_dirty_returns_none_without_a_current_document`、`mark_document_dirty_overwrites_snapshot_for_the_same_id`、`set_current_frontmatter_replaces_raw_frontmatter_without_touching_generation_or_unsaved`、`set_current_frontmatter_then_mark_document_dirty_snapshots_both`、`apply_saved_document_clean_clears_dirty_and_removes_unsaved_entry`、`apply_saved_document_revision_only_keeps_dirty_when_generation_advanced`、`apply_saved_document_not_current_when_epoch_advanced_does_not_overwrite_document`、`apply_batch_saved_updates_current_document_revision_and_body`、`apply_batch_saved_partial_failure_only_clears_successful_entries`、`discard_unsaved_documents_recomputes_current_dirty`。覆盖了原计划 7 条语义里剩余的第 4/5 条，外加用户在批准时补充要求的"batch save 更新当前 revision"、"partial batch save 只清成功项"、"discard 重新计算当前 dirty"、"frontmatter 更新后 snapshot 包含新 frontmatter"四点。`cloudstack-application` 92 → 103（+11），`cloudstack-gtk` 不变，workspace 总数 292 → 303，与预期吻合。
+
+至此 9B 三个生命周期簇全部完成。三个簇全部完成后本该统一把这十个字段私有化，但按用户的决定：`git_refresh_generation` 属于 9C（Git 刷新 request/completion 收进 Session 时才处理），9B 收尾时不提前私有化任何字段——9C 把 `git_refresh_generation` 也收进方法之后，再一次性把全部 10 个字段私有化，避免中途出现"半私有 API"。9B 结束时的实际状态是：字段依然全部 `pub`，但 GTK 对 `project`/`posts`/`document`/`dirty`/`document_epoch`/`edit_generation`/`unsaved_documents` 这 9 个字段只保留读，不再有任何直接写；`git_refresh_generation` 仍然读写皆有，等 9C 处理。
 
 **9C（未开始）：统一能力计算和异步 generation。** `WorkspaceSession` 提供 `capabilities()`（取代 GTK 手工拼 `WorkspaceCapabilitiesInput`）、`begin_git_refresh()`/`apply_git_snapshot(request, snapshot)`（不是重写 `should_apply_git_refresh()`，而是让 session 统一负责生成 request、保存 generation、校验 completion、安装 snapshot）。完成后 GTK 不再自己维护应用状态不变量。
 
