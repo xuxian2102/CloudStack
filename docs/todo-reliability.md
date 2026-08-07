@@ -220,7 +220,7 @@ fn on_save_clicked(...) {
 
 ## 后续路线：WorkspaceSession → 无损文本合同 → Live Preview（用户提出，2026-08-07，application-layer 第一阶段收尾后）
 
-**状态：阶段 9 全部完成（9A/9B/9C）。`WorkspaceSession` 十个字段已全部私有化，`cloudstack-gtk` 不再直接读写任何一个，只通过方法和只读 getter。阶段 10～14 尚未开始。**
+**状态：阶段 9 全部完成并冻结（9A/9B/9C + 9C.1 修正）。`WorkspaceSession` 十个字段已全部私有化，`cloudstack-gtk` 不再直接读写任何一个，只通过方法和只读 getter。阶段 10～14 尚未开始。**
 
 顺序固定，不要跳步：
 
@@ -315,6 +315,14 @@ rg '\.session\.(project|posts|document|dirty|busy|document_epoch|edit_generation
 **测试**：新增 10 个：`set_busy_updates_the_busy_flag`、`capabilities_reflects_current_state`、`begin_git_refresh_returns_none_and_clears_snapshot_without_a_project`、`begin_git_refresh_advances_generation_and_captures_current_context`、`apply_git_snapshot_installs_when_request_is_current`、`apply_git_snapshot_rejects_a_stale_generation`、`apply_git_snapshot_rejects_after_project_switched`、`replace_project_context_replaces_when_root_matches`（额外断言 document/dirty/document_epoch/unsaved_documents 都不受影响）、`replace_project_context_rejects_a_different_root`、`replace_project_context_rejects_without_a_project`。`cloudstack-application` 103 → 113（+10），`cloudstack-gtk` 不变，workspace 总数 303 → 313。
 
 至此 `cloudstack-gtk` 的 `EditorState` 只剩 `session: WorkspaceSession`（业务状态，全部私有，只经方法/getter 访问）+ `loading_buffer`（SourceView buffer 加载标志）+ `draft_queue`（草稿 FIFO 队列 + GLib 定时器）+ `pending_assets`（待提交图片，跟剪贴板/图片 UI 生命周期绑定）四个字段，第 1～9 项（含 9A/9B/9C）规划的应用状态机迁移全部完成。
+
+**9C.1（已完成，用户在远端复核时发现的边界问题）：Git 刷新 generation 要跨 workspace 生命周期失效，不能只跨同一次会话内的刷新失效。** `is_git_refresh_current` 原本只校验"当前项目 root == request root && 当前 generation == request generation"，而 `install_workspace`/`close_workspace` 都不推进 `git_refresh_generation`。理论序列：打开 `/project`（generation=5）→ 发起刷新 A（request=(/project,5)）→ 关闭→重新打开同一个 `/project`（generation 仍是 5，因为没人推进）→ 旧刷新 A 完成——此时 root 和 generation 都还匹配，A 会被误判成 current，把上一个 workspace 会话的 Git 快照装进新会话。GTK 当前的调用时序不容易实际触发（重新打开后很快会发起新刷新），但这是 `WorkspaceSession` 自身该维护的不变量，不该依赖调用方的时序习惯。
+
+修法：`install_workspace`/`close_workspace` 都追加 `self.git_refresh_generation = self.git_refresh_generation.wrapping_add(1);`——把 `git_refresh_generation` 的语义从"每次 Git 刷新自增"稍微放宽成"Git 快照新鲜度 generation；任何会让旧快照请求失效的事件都推进"，`edit_generation` 不受影响（跟编辑/保存无关，继续保持原样）。
+
+顺手收紧一处小的 API 泄漏：`GitRefreshRequest.generation` 字段改成私有（`context` 保持 `pub`，因为 GTK 确实需要它去执行 `git::snapshot()`）；确认 `cloudstack-gtk` 里没有任何地方读取过 `request.generation`，这个字段本来就只有 `WorkspaceSession` 自己需要看到。
+
+**测试**：新增 1 个回归测试 `git_refresh_from_previous_same_root_workspace_is_stale`（打开 `/project` → 发起刷新 → 关闭 → 重新打开同一个 `/project` → 断言旧刷新请求不再是 current），并更新了 `install_workspace_clears_previous_document_git_snapshot_and_unsaved_map` 里对 `git_refresh_generation` 保持不变的过时断言（现在会推进）。`cloudstack-application` 113 → 114（+1），`cloudstack-gtk` 不变，workspace 总数 313 → 314。
 
 ### 阶段 10：无损文本文件合同
 

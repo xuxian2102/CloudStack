@@ -77,16 +77,19 @@ pub struct DocumentDirty {
 #[derive(Debug, Clone)]
 pub struct GitRefreshRequest {
     pub context: ProjectContext,
-    pub generation: u64,
+    generation: u64,
 }
 
 impl WorkspaceSession {
     /// 打开一个新 workspace：安装 `project`/`posts`，清空上一个 workspace
     /// 遗留的当前文档、dirty、Git 快照和未保存快照表，并推进
     /// `document_epoch`（让任何还在飞行的、绑定旧 epoch 的异步请求/预览在
-    /// 完成时被拒绝应用）。不触碰 `edit_generation`/`git_refresh_generation`——
-    /// 两者分别只在编辑和 Git 刷新时才有意义，不属于"打开 workspace"这个
-    /// 转换。
+    /// 完成时被拒绝应用）。也推进 `git_refresh_generation`——即使新旧两次
+    /// 打开的是同一个项目 root，上一个 workspace 会话里还没完成的 Git
+    /// 刷新请求也必须失效，不能因为 root 恰好相同就被新会话当成 current
+    /// （`root == root && generation == generation` 的双重校验里，root 相同
+    /// 不该单独成立）。不触碰 `edit_generation`——只在编辑时才有意义，不
+    /// 属于"打开 workspace"这个转换。
     pub fn install_workspace(
         &mut self,
         context: ProjectContext,
@@ -99,6 +102,7 @@ impl WorkspaceSession {
         self.git_snapshot = None;
         self.unsaved_documents.clear();
         self.document_epoch = self.document_epoch.wrapping_add(1);
+        self.git_refresh_generation = self.git_refresh_generation.wrapping_add(1);
         WorkspaceInstalled {
             document_epoch: self.document_epoch,
         }
@@ -107,7 +111,10 @@ impl WorkspaceSession {
     /// 关闭当前 workspace，回到没有项目打开的状态。调用方必须先确认没有
     /// 未保存文章（这个前置条件由 GTK 的 `ensure_no_unsaved_documents` 负责，
     /// 不属于这个方法的职责）；`unsaved_documents.clear()` 仍然执行一遍，
-    /// 只是防御性的——正常情况下这个表此时已经是空的。
+    /// 只是防御性的——正常情况下这个表此时已经是空的。`git_refresh_generation`
+    /// 推进的理由跟 [`WorkspaceSession::install_workspace`] 一样：关闭时可能
+    /// 还有一次 Git 刷新在飞行，之后重新打开同一个 root 不能让它被误判为
+    /// current。
     pub fn close_workspace(&mut self) -> WorkspaceClosed {
         self.project = None;
         self.posts.clear();
@@ -115,6 +122,7 @@ impl WorkspaceSession {
         self.dirty = false;
         self.git_snapshot = None;
         self.unsaved_documents.clear();
+        self.git_refresh_generation = self.git_refresh_generation.wrapping_add(1);
         self.document_epoch = self.document_epoch.wrapping_add(1);
         WorkspaceClosed {
             document_epoch: self.document_epoch,
@@ -473,9 +481,11 @@ mod tests {
         assert!(!session.dirty);
         assert!(session.git_snapshot.is_none());
         assert!(session.unsaved_documents.is_empty());
-        // 打开新 workspace 不是一次编辑或 Git 刷新，这两个 generation 保持原样。
+        // 打开新 workspace 不是一次编辑，edit_generation 保持原样；但任何
+        // 还在飞行的旧 Git 刷新请求都必须失效，所以 git_refresh_generation
+        // 必须推进。
         assert_eq!(session.edit_generation, 9);
-        assert_eq!(session.git_refresh_generation, 3);
+        assert_eq!(session.git_refresh_generation, 4);
     }
 
     #[test]
@@ -1043,5 +1053,21 @@ mod tests {
 
         assert!(!applied, "项目已经切换，旧项目的刷新结果不能被安装");
         assert!(session.git_snapshot().is_none());
+    }
+
+    #[test]
+    fn git_refresh_from_previous_same_root_workspace_is_stale() {
+        let mut session = WorkspaceSession::default();
+
+        session.install_workspace(context("/tmp/project"), vec![]);
+        let old = session.begin_git_refresh().unwrap();
+
+        session.close_workspace();
+        session.install_workspace(context("/tmp/project"), vec![]);
+
+        assert!(
+            !session.is_git_refresh_current(&old),
+            "root 相同不代表还是同一次 workspace 会话，关闭再重开必须让旧请求失效"
+        );
     }
 }
