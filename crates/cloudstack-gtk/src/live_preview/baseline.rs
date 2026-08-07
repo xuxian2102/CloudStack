@@ -27,7 +27,7 @@ use sourceview::prelude::*;
 
 use super::adapter::{apply_plan, validate_plan};
 use super::analysis::{analyze, DecorationPlan};
-use super::coordinates::{iter_at_point, resolve_point};
+use super::coordinates::{iter_at_point, SourceIndex};
 use super::tags::LivePreviewTags;
 
 /// ~1 KiB of representative Markdown: headings, paragraph text mixing
@@ -178,13 +178,16 @@ fn bench_validate_plan(
     summarize(durations)
 }
 
-/// Phase 12E step 1: measures just the repeated `resolve_point` scan
-/// that both `validate_plan` (via `validate_span`) and the resolve loop
-/// below (via `iter_at_point`) perform -- one full pass over every
-/// span's start and end point, no GTK involved at all. Isolates the
-/// specific hypothesis under review: does `resolve_point`'s
-/// from-the-start-of-document rescan (`source.split('\n')`, restarted
-/// for every call) dominate, independent of anything GTK does.
+/// Phase 12E step 2 (post-fix): measures the real per-call cost of
+/// coordinate resolution as `validate_plan`/`apply_plan` now actually do
+/// it -- build one `SourceIndex` (O(n), timed, since a real call pays
+/// this too) then resolve every span's start/end with O(1) lookups
+/// against it. No GTK involved. Compare against the pre-fix
+/// `bench_raw_resolve_point` numbers recorded in
+/// `docs/LIVE_PREVIEW_V1_BASELINE.md` §5.3 (which called the free
+/// `resolve_point` convenience wrapper per span -- deliberately *not*
+/// what production code does anymore, see `coordinates.rs`'s doc
+/// comments).
 fn bench_raw_resolve_point(
     source: &str,
     plan: &DecorationPlan,
@@ -192,31 +195,33 @@ fn bench_raw_resolve_point(
     samples: usize,
 ) -> Timings {
     for _ in 0..warmup {
+        let index = black_box(SourceIndex::new(black_box(source)));
         for span in &plan.styles {
-            let _ = black_box(resolve_point(black_box(source), span.range.start.point));
-            let _ = black_box(resolve_point(black_box(source), span.range.end.point));
+            let _ = black_box(index.resolve_point(source, span.range.start.point));
+            let _ = black_box(index.resolve_point(source, span.range.end.point));
         }
     }
     let mut durations = Vec::with_capacity(samples);
     for _ in 0..samples {
         let start = Instant::now();
+        let index = black_box(SourceIndex::new(black_box(source)));
         for span in &plan.styles {
-            let _ = black_box(resolve_point(black_box(source), span.range.start.point));
-            let _ = black_box(resolve_point(black_box(source), span.range.end.point));
+            let _ = black_box(index.resolve_point(source, span.range.start.point));
+            let _ = black_box(index.resolve_point(source, span.range.end.point));
         }
         durations.push(start.elapsed());
     }
     summarize(durations)
 }
 
-/// Phase 12E step 1: measures the per-span `SourcePoint -> GtkTextIter`
-/// resolution loop exactly as `apply_plan` runs it (its phase 3: build
-/// the full `(tag, start, end)` list before mutating any tag) --
-/// includes both `resolve_point`'s scan (via `iter_at_point`) and GTK's
-/// own `iter_at_line`/`set_line_index` cost, without the validation or
-/// tag-mutation phases around it. Comparing this against
-/// `bench_raw_resolve_point` isolates GTK's own iterator-construction
-/// cost from the coordinate scan.
+/// Phase 12E step 2 (post-fix): measures the per-span `SourcePoint ->
+/// GtkTextIter` resolution loop exactly as `apply_plan` now runs it (its
+/// phase 3: build the full `(tag, start, end)` list before mutating any
+/// tag) -- one `SourceIndex` built once (timed) and reused for every
+/// span's start and end, via `SourceIndex::iter_at_point`. Includes GTK's
+/// own `iter_at_line`/`set_line_index` cost on top of the O(1) coordinate
+/// lookup. Comparing this against `bench_raw_resolve_point` isolates
+/// GTK's own iterator-construction cost from the coordinate resolution.
 fn bench_resolve_all_iters(
     buffer: &sourceview::Buffer,
     source: &str,
@@ -226,17 +231,19 @@ fn bench_resolve_all_iters(
 ) -> Timings {
     let text_buffer: &gtk::TextBuffer = buffer.upcast_ref();
     for _ in 0..warmup {
+        let index = SourceIndex::new(source);
         for span in &plan.styles {
-            let _ = black_box(iter_at_point(text_buffer, source, span.range.start.point));
-            let _ = black_box(iter_at_point(text_buffer, source, span.range.end.point));
+            let _ = black_box(index.iter_at_point(text_buffer, source, span.range.start.point));
+            let _ = black_box(index.iter_at_point(text_buffer, source, span.range.end.point));
         }
     }
     let mut durations = Vec::with_capacity(samples);
     for _ in 0..samples {
         let start = Instant::now();
+        let index = SourceIndex::new(source);
         for span in &plan.styles {
-            let _ = black_box(iter_at_point(text_buffer, source, span.range.start.point));
-            let _ = black_box(iter_at_point(text_buffer, source, span.range.end.point));
+            let _ = black_box(index.iter_at_point(text_buffer, source, span.range.start.point));
+            let _ = black_box(index.iter_at_point(text_buffer, source, span.range.end.point));
         }
         durations.push(start.elapsed());
     }

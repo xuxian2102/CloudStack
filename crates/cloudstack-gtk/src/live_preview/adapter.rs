@@ -14,7 +14,7 @@
 use gtk::prelude::*;
 
 use super::analysis::{DecorationPlan, StyleKind, StyleSpan};
-use super::coordinates::{iter_at_point, resolve_point};
+use super::coordinates::SourceIndex;
 use super::tags::LivePreviewTags;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,11 +39,33 @@ pub enum ApplyPlanError {
 /// already guarantee about its own output; this function exists as a
 /// boundary that a later untrusted producer (a worker thread, in Phase
 /// 12C) has to pass, not because today's `analyze` is expected to fail it.
+///
+/// Builds its own `SourceIndex` — a single-call convenience wrapper.
+/// `apply_plan` below builds one `SourceIndex` for the whole call and
+/// passes it to `validate_plan_with_index` instead, so validating and
+/// then resolving every span doesn't rescan the source twice over (see
+/// `docs/LIVE_PREVIEW_V1_BASELINE.md` §5.3/§9 — this rescan was measured
+/// to be essentially the entire cost of `apply_plan` on large documents).
+///
+/// Kept `pub` deliberately as a pure, GTK-free testable boundary — not
+/// currently called by production code (`apply_plan` calls
+/// `validate_plan_with_index` directly instead), only by this module's
+/// own tests and the Phase 12D/12E baseline harness.
+#[allow(dead_code)]
 pub fn validate_plan(source: &str, plan: &DecorationPlan) -> bool {
-    plan.source_len == source.len() && plan.styles.iter().all(|span| validate_span(source, span))
+    let index = SourceIndex::new(source);
+    validate_plan_with_index(source, &index, plan)
 }
 
-fn validate_span(source: &str, span: &StyleSpan) -> bool {
+fn validate_plan_with_index(source: &str, index: &SourceIndex, plan: &DecorationPlan) -> bool {
+    plan.source_len == source.len()
+        && plan
+            .styles
+            .iter()
+            .all(|span| validate_span_with_index(source, index, span))
+}
+
+fn validate_span_with_index(source: &str, index: &SourceIndex, span: &StyleSpan) -> bool {
     let start = span.range.start.byte;
     let end = span.range.end.byte;
 
@@ -53,10 +75,10 @@ fn validate_span(source: &str, span: &StyleSpan) -> bool {
     if !source.is_char_boundary(start) || !source.is_char_boundary(end) {
         return false;
     }
-    if resolve_point(source, span.range.start.point) != Some(start) {
+    if index.resolve_point(source, span.range.start.point) != Some(start) {
         return false;
     }
-    if resolve_point(source, span.range.end.point) != Some(end) {
+    if index.resolve_point(source, span.range.end.point) != Some(end) {
         return false;
     }
     if let StyleKind::Heading(level) = span.kind {
@@ -91,7 +113,14 @@ pub fn apply_plan(
     tags: &LivePreviewTags,
     plan: &DecorationPlan,
 ) -> Result<(), ApplyPlanError> {
-    if !validate_plan(source, plan) {
+    // One SourceIndex for this source snapshot, reused for both
+    // validation and resolution below -- see `validate_plan`'s doc
+    // comment. Built fresh per call rather than cached, since `source`
+    // can differ between calls and there is no cache-invalidation
+    // signal this function could use to detect that on its own.
+    let index = SourceIndex::new(source);
+
+    if !validate_plan_with_index(source, &index, plan) {
         return Err(ApplyPlanError::InvalidPlan);
     }
 
@@ -103,9 +132,11 @@ pub fn apply_plan(
     let text_buffer: &gtk::TextBuffer = buffer.upcast_ref();
     let mut resolved = Vec::with_capacity(plan.styles.len());
     for span in &plan.styles {
-        let start = iter_at_point(text_buffer, source, span.range.start.point)
+        let start = index
+            .iter_at_point(text_buffer, source, span.range.start.point)
             .ok_or(ApplyPlanError::InvalidGtkRange)?;
-        let end = iter_at_point(text_buffer, source, span.range.end.point)
+        let end = index
+            .iter_at_point(text_buffer, source, span.range.end.point)
             .ok_or(ApplyPlanError::InvalidGtkRange)?;
         let tag = tags
             .tag_for(span.kind)
